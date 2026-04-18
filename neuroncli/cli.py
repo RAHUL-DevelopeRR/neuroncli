@@ -1,46 +1,18 @@
-"""NeuronCLI — CLI entry point. Claude Code-style clean interface. v1.1"""
+"""NeuronCLI — CLI entry point. Claude Code-style interface. v1.1"""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-import time
 
 from .agent import Agent
 from .config import VERSION, AgentConfig
 from .provider import create_provider
-
-
-# ── ANSI Colors ───────────────────────────────────────────────────
-
-class C:
-    RESET   = "\033[0m"
-    BOLD    = "\033[1m"
-    DIM     = "\033[2m"
-    CYAN    = "\033[96m"
-    GREEN   = "\033[92m"
-    YELLOW  = "\033[93m"
-    RED     = "\033[91m"
-    MAGENTA = "\033[95m"
-    BLUE    = "\033[94m"
-    GRAY    = "\033[90m"
-    WHITE   = "\033[97m"
-    # Orange-ish for branding (via 256-color)
-    ORANGE  = "\033[38;5;208m"
-
-
-# ── Terminal Logo ─────────────────────────────────────────────────
-
-LOGO = f"""
-{C.ORANGE}{C.BOLD}  ╱╲
- ╱  ╲   ┃╻╻ ┏━╸╻ ╻┏━┓┏━┓┏╻╻
-╱ ╱╲ ╲  ┃┃┃ ┣╸ ┃ ┃┣┳┛┃ ┃┃┃┃
-╲ ╲╱ ╱  ┃┗┛ ┗━╸┗━┛╹╹┗┗━┛┃┗┛
- ╲  ╱   {C.RESET}{C.DIM}AI Coding Agent · v{VERSION}{C.RESET}
-{C.ORANGE}{C.BOLD}  ╲╱{C.RESET}
-"""
-
-LOGO_COMPACT = f"{C.ORANGE}{C.BOLD}🧬 NEURON{C.RESET} {C.DIM}v{VERSION}{C.RESET}"
+from .ui import (
+    render_startup_screen, _neuron_text, _GRAY, _ORANGE, _GREEN, _RED,
+    RST, BOLD, DIM, bullet, sub_item, error_line, success_line,
+)
 
 
 # ── Argument Parser ───────────────────────────────────────────────
@@ -48,90 +20,113 @@ LOGO_COMPACT = f"{C.ORANGE}{C.BOLD}🧬 NEURON{C.RESET} {C.DIM}v{VERSION}{C.RESE
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="neuron",
-        description="NeuronCLI — AI Coding Agent powered by Kimi K2.5 + Ollama",
+        description="NeuronCLI - AI Coding Agent powered by Kimi K2.5 + Ollama",
     )
-    parser.add_argument(
-        "task",
-        nargs="?",
-        default=None,
-        help="Task to execute (omit for interactive REPL mode)",
-    )
-    parser.add_argument(
-        "--model", "-m",
-        default=None,
-        help="Model to use (default: moonshotai/kimi-k2.5)",
-    )
-    parser.add_argument(
-        "--provider", "-p",
-        choices=["openrouter", "ollama"],
-        default=None,
-        help="LLM provider: openrouter (cloud, free) or ollama (local)",
-    )
-    parser.add_argument(
-        "--dir", "-d",
-        default=None,
-        help="Working directory (default: current directory)",
-    )
-    parser.add_argument(
-        "--max-iter",
-        type=int,
-        default=None,
-        help="Max agent iterations (default: 15)",
-    )
-    parser.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Disable streaming (wait for full response)",
-    )
-    parser.add_argument(
-        "--no-confirm",
-        action="store_true",
-        help="Skip confirmation prompts for file writes",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"NeuronCLI v{VERSION}",
-    )
+    parser.add_argument("task", nargs="?", default=None,
+                        help="Task to execute (omit for interactive REPL)")
+    parser.add_argument("--model", "-m", default=None, help="Model to use")
+    parser.add_argument("--provider", "-p", choices=["openrouter", "ollama"],
+                        default=None, help="LLM provider")
+    parser.add_argument("--dir", "-d", default=None, help="Working directory")
+    parser.add_argument("--max-iter", type=int, default=None,
+                        help="Max agent iterations (default: 15)")
+    parser.add_argument("--no-stream", action="store_true",
+                        help="Disable streaming")
+    parser.add_argument("--no-confirm", action="store_true",
+                        help="Skip confirmation prompts (YOLO mode)")
+    parser.add_argument("--version", action="version",
+                        version=f"NeuronCLI v{VERSION}")
     return parser
+
+
+# ── NEURON.md Support ─────────────────────────────────────────────
+
+def _find_neuron_md(working_dir: str) -> str | None:
+    """Look for NEURON.md in the working directory."""
+    p = os.path.join(working_dir, "NEURON.md")
+    if os.path.isfile(p):
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except OSError:
+            pass
+    return None
+
+
+def _create_neuron_md(working_dir: str) -> None:
+    """Create a default NEURON.md template."""
+    template = """# NEURON.md — Project Context for NeuronCLI
+
+## Project Overview
+<!-- Describe what this project does -->
+
+## Tech Stack
+<!-- List the technologies used -->
+
+## Project Structure
+<!-- Outline the key directories and files -->
+
+## Rules
+<!-- Add workflow rules for the AI agent -->
+<!-- Examples: -->
+<!-- - Always create a git branch before making changes -->
+<!-- - Run tests after editing code -->
+<!-- - Use TypeScript, not JavaScript -->
+
+## Notes
+<!-- Any additional context the AI should know -->
+"""
+    path = os.path.join(working_dir, "NEURON.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(template)
+    print(f"  {_GREEN}{BOLD}v{RST} Created NEURON.md in {working_dir}")
+    print(f"  {DIM}Edit it to give NeuronCLI context about your project.{RST}\n")
 
 
 # ── Interactive REPL ──────────────────────────────────────────────
 
 def run_repl(config: AgentConfig):
-    """Interactive session — Claude Code-style clean interface."""
+    """Interactive session — Claude Code-style."""
     agent = Agent(config)
 
-    print(LOGO)
-    model_short = config.active_model.split("/")[-1]
-    provider_icon = "☁" if config.provider == "openrouter" else "⌂"
-    print(f"  {C.DIM}{provider_icon} {config.provider} · {model_short} · {config.working_dir}{C.RESET}")
-    print(f"  {C.DIM}Type a task or /help. Ctrl+C to cancel, /exit to quit.{C.RESET}\n")
+    # Check for NEURON.md
+    neuron_md = _find_neuron_md(config.working_dir)
+    has_neuron_md = neuron_md is not None
+
+    # Render startup screen
+    startup = render_startup_screen(
+        working_dir=config.working_dir,
+        provider=config.provider,
+        model=config.active_model,
+        neuron_md_exists=has_neuron_md,
+    )
+    print(startup)
+    print()
 
     while True:
         try:
-            user_input = input(f"  {C.GREEN}{C.BOLD}>{C.RESET} ").strip()
+            user_input = input(f"  {_ORANGE}{BOLD}>{RST} ").strip()
             if not user_input:
                 continue
 
-            # ── Slash commands ────────────────────────────────
+            # Slash commands
             if user_input.startswith("/"):
                 result = _handle_command(user_input, agent, config)
                 if result == "exit":
                     break
                 continue
 
-            # ── Execute task ──────────────────────────────────
-            print()  # Spacing before output
+            # Execute task
+            print()
             agent.run(user_input)
 
         except KeyboardInterrupt:
-            print(f"\n  {C.DIM}(interrupted){C.RESET}")
+            print(f"\n  {DIM}(interrupted){RST}")
             continue
         except EOFError:
             break
 
-    print(f"\n  {C.DIM}Session ended.{C.RESET}\n")
+    print(f"\n  {DIM}Session ended.{RST}\n")
 
 
 def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
@@ -145,58 +140,61 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
 
     elif command == "/help":
         print(f"""
-  {C.BOLD}Commands:{C.RESET}
-    {C.YELLOW}/help{C.RESET}              Show this help
-    {C.YELLOW}/exit{C.RESET}              Exit NeuronCLI
-    {C.YELLOW}/clear{C.RESET}             Clear conversation history
-    {C.YELLOW}/model <name>{C.RESET}      Switch model
-    {C.YELLOW}/models{C.RESET}            List available models
-    {C.YELLOW}/provider <name>{C.RESET}   Switch provider (openrouter/ollama)
-    {C.YELLOW}/login{C.RESET}             Re-authenticate with OpenRouter
-    {C.YELLOW}/logout{C.RESET}            Remove stored API key
-    {C.YELLOW}/dir <path>{C.RESET}        Change working directory
-    {C.YELLOW}/status{C.RESET}            Check provider connection
-    {C.YELLOW}/config{C.RESET}            Show current configuration
+  {BOLD}Commands:{RST}
+    {_ORANGE}/help{RST}              Show this help
+    {_ORANGE}/exit{RST}              Exit NeuronCLI
+    {_ORANGE}/init{RST}              Create NEURON.md project context
+    {_ORANGE}/clear{RST}             Clear conversation history
+    {_ORANGE}/model <name>{RST}      Switch model
+    {_ORANGE}/models{RST}            List available models
+    {_ORANGE}/provider <name>{RST}   Switch provider (openrouter/ollama)
+    {_ORANGE}/login{RST}             Re-authenticate with OpenRouter
+    {_ORANGE}/logout{RST}            Remove stored API key
+    {_ORANGE}/dir <path>{RST}        Change working directory
+    {_ORANGE}/status{RST}            Check provider connection
+    {_ORANGE}/config{RST}            Show current configuration
 """)
+
+    elif command == "/init":
+        _create_neuron_md(config.working_dir)
 
     elif command == "/clear":
         agent.clear_history()
-        print(f"  {C.GREEN}✓{C.RESET} History cleared.")
+        print(f"  {_GREEN}{BOLD}v{RST} History cleared.\n")
 
     elif command == "/model":
         if not arg:
-            print(f"  Model: {C.BOLD}{config.active_model}{C.RESET}")
+            print(f"  Model: {BOLD}{config.active_model}{RST}\n")
         else:
             if config.provider == "ollama":
                 config.ollama_model = arg.strip()
             else:
                 config.model = arg.strip()
             agent.client = create_provider(config)
-            print(f"  {C.GREEN}✓{C.RESET} Model: {C.BOLD}{config.active_model}{C.RESET}")
+            print(f"  {_GREEN}{BOLD}v{RST} Model: {BOLD}{config.active_model}{RST}\n")
 
     elif command == "/models":
         models = agent.client.list_models()
         if models:
-            print(f"\n  {C.BOLD}Models ({config.provider}):{C.RESET}")
+            print(f"\n  {BOLD}Models ({config.provider}):{RST}")
             for m in models:
-                marker = f" {C.GREEN}◄{C.RESET}" if m == config.active_model else ""
+                marker = f" {_GREEN}<{RST}" if m == config.active_model else ""
                 print(f"    {m}{marker}")
             print()
         else:
-            print(f"  {C.RED}✗{C.RESET} Cannot fetch models.")
+            print(f"  {_RED}X{RST} Cannot fetch models.\n")
 
     elif command == "/provider":
         if not arg:
-            print(f"  Provider: {C.BOLD}{config.provider}{C.RESET}")
+            print(f"  Provider: {BOLD}{config.provider}{RST}\n")
         else:
             new_provider = arg.strip().lower()
             if new_provider not in ("openrouter", "ollama"):
-                print(f"  {C.RED}✗{C.RESET} Unknown provider. Use 'openrouter' or 'ollama'.")
+                print(f"  {_RED}X{RST} Unknown provider. Use 'openrouter' or 'ollama'.\n")
             else:
                 config.provider = new_provider
                 agent.client = create_provider(config)
-                icon = "☁" if new_provider == "openrouter" else "⌂"
-                print(f"  {C.GREEN}✓{C.RESET} {icon} {new_provider} ({config.active_model})")
+                print(f"  {_GREEN}{BOLD}v{RST} {new_provider} ({config.active_model})\n")
 
     elif command == "/login":
         from .auth import run_oauth_flow
@@ -205,39 +203,38 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
             config.api_key = new_key
             config.provider = "openrouter"
             agent.client = create_provider(config)
-            print(f"  {C.GREEN}✓{C.RESET} Authenticated.")
+            print(f"  {_GREEN}{BOLD}v{RST} Authenticated.\n")
 
     elif command == "/logout":
         from .auth import CONFIG_FILE
         if CONFIG_FILE.exists():
             CONFIG_FILE.unlink()
-            print(f"  {C.GREEN}✓{C.RESET} API key removed.")
+            print(f"  {_GREEN}{BOLD}v{RST} API key removed.\n")
         else:
-            print(f"  {C.DIM}No stored key.{C.RESET}")
+            print(f"  {DIM}No stored key.{RST}\n")
 
     elif command == "/dir":
         if not arg:
-            print(f"  Dir: {C.BOLD}{config.working_dir}{C.RESET}")
+            print(f"  Dir: {BOLD}{config.working_dir}{RST}\n")
         else:
-            import os
             path = os.path.abspath(arg.strip())
             if os.path.isdir(path):
                 config.working_dir = path
-                print(f"  {C.GREEN}✓{C.RESET} {path}")
+                print(f"  {_GREEN}{BOLD}v{RST} {path}\n")
             else:
-                print(f"  {C.RED}✗{C.RESET} Not a directory: {path}")
+                print(f"  {_RED}X{RST} Not a directory: {path}\n")
 
     elif command == "/status":
         client = create_provider(config)
         if client.health_check():
-            print(f"  {C.GREEN}✓{C.RESET} {config.provider} is up ({config.active_model})")
+            print(f"  {_GREEN}{BOLD}v{RST} {config.provider} is up ({config.active_model})\n")
         else:
-            print(f"  {C.RED}✗{C.RESET} {config.provider} is not responding.")
+            print(f"  {_RED}X{RST} {config.provider} is not responding.\n")
 
     elif command == "/config":
         key_display = "***" + config.api_key[-4:] if config.api_key else "(none)"
         print(f"""
-  {C.BOLD}Configuration:{C.RESET}
+  {BOLD}Configuration:{RST}
     Provider:       {config.provider}
     Model:          {config.active_model}
     Temperature:    {config.temperature}
@@ -249,7 +246,7 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
 """)
 
     else:
-        print(f"  {C.DIM}Unknown command. Type /help{C.RESET}")
+        print(f"  {DIM}Unknown command. Type /help{RST}\n")
 
     return None
 
@@ -257,9 +254,8 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
 # ── Main Entry Point ──────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
-    import os as _os
     if sys.platform == "win32":
-        _os.system("")  # Enable ANSI escape codes
+        os.system("")  # Enable ANSI
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -269,7 +265,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # Build config
     config = AgentConfig.from_env()
     if args.provider:
         config.provider = args.provider
@@ -284,25 +279,24 @@ def main(argv: list[str] | None = None) -> int:
         config.max_iterations = args.max_iter
     if args.no_stream:
         config.streaming = False
-    if hasattr(args, 'no_confirm') and args.no_confirm:
+    if args.no_confirm:
         config.confirm_dangerous = False
 
     # Check provider
     client = create_provider(config)
     if not client.health_check():
         if config.provider == "openrouter":
-            print(f"\n  {C.RED}✗ OpenRouter not reachable.{C.RESET}")
-            print(f"  {C.DIM}Check internet or use --provider ollama{C.RESET}\n")
+            print(f"\n  {_RED}X OpenRouter not reachable.{RST}")
+            print(f"  {DIM}Check internet or use --provider ollama{RST}\n")
         else:
-            print(f"\n  {C.RED}✗ Ollama not running.{C.RESET}")
-            print(f"  {C.DIM}Start with: ollama serve{C.RESET}\n")
+            print(f"\n  {_RED}X Ollama not running.{RST}")
+            print(f"  {DIM}Start with: ollama serve{RST}\n")
         return 1
 
     if args.task:
-        # One-shot mode
-        print(f"\n{LOGO_COMPACT}")
+        # One-shot mode — compact header
         model_short = config.active_model.split("/")[-1]
-        print(f"  {C.DIM}{config.provider} · {model_short} · {config.working_dir}{C.RESET}\n")
+        print(f"\n  {_neuron_text()} {DIM}v{VERSION} | {config.provider} | {model_short}{RST}\n")
         agent = Agent(config)
         result = agent.run(args.task)
         return 0 if not result.aborted else 1
