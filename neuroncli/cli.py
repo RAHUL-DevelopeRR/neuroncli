@@ -130,6 +130,8 @@ def _handle_repl_command(cmd: str, agent: Agent, config: AgentConfig) -> str | N
   {C.YELLOW}/model <name>{C.RESET}      Switch model
   {C.YELLOW}/models{C.RESET}            List available models
   {C.YELLOW}/provider <name>{C.RESET}   Switch provider (openrouter / ollama)
+  {C.YELLOW}/login{C.RESET}             Re-authenticate with OpenRouter
+  {C.YELLOW}/logout{C.RESET}            Remove stored API key
   {C.YELLOW}/dir <path>{C.RESET}        Change working directory
   {C.YELLOW}/status{C.RESET}            Check provider connection
   {C.YELLOW}/config{C.RESET}            Show current configuration
@@ -207,6 +209,23 @@ def _handle_repl_command(cmd: str, agent: Agent, config: AgentConfig) -> str | N
   Streaming:        {config.streaming}
   API Key:          {"***" + config.api_key[-6:] if config.api_key else "(none)"}
 """)
+
+    elif command == "/login":
+        from .auth import run_oauth_flow, store_api_key
+        new_key = run_oauth_flow()
+        if new_key:
+            config.api_key = new_key
+            config.provider = "openrouter"
+            agent.client = create_provider(config)
+            print(f"{C.GREEN}✓ Re-authenticated. Provider switched to openrouter.{C.RESET}")
+
+    elif command == "/logout":
+        from .auth import CONFIG_FILE
+        if CONFIG_FILE.exists():
+            CONFIG_FILE.unlink()
+            print(f"{C.GREEN}✓ API key removed from {CONFIG_FILE}{C.RESET}")
+        else:
+            print(f"{C.YELLOW}No stored API key found.{C.RESET}")
 
     else:
         print(f"{C.YELLOW}Unknown command: {command}. Type /help for available commands.{C.RESET}")

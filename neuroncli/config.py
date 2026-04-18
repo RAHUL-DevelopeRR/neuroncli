@@ -1,6 +1,7 @@
 """NeuronCLI — Configuration module. v1.1 with OpenRouter + Ollama dual-provider."""
 
 from __future__ import annotations
+from .auth import ensure_api_key
 
 import os
 from dataclasses import dataclass, field
@@ -50,10 +51,9 @@ class AgentConfig:
     def from_env(cls) -> "AgentConfig":
         """Build config from environment variables with defaults."""
         provider = os.environ.get("NEURON_PROVIDER", "openrouter")
-        api_key = os.environ.get(
-            "OPENROUTER_API_KEY",
-            "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"
-        )
+
+        # Get API key through the auth chain (env var → config file → OAuth)
+        api_key = ensure_api_key() or ""
 
         # If no API key and provider is openrouter, fall back to ollama
         if provider == "openrouter" and not api_key:

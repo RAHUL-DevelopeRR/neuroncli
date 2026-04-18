@@ -3,6 +3,7 @@
 from .config import AgentConfig, APP_NAME, VERSION
 from .agent import Agent, AgentResult
 from .provider import ChatMessage, create_provider
+from .auth import ensure_api_key
 from .tools import registry as tool_registry
 
 __version__ = VERSION
@@ -12,5 +13,6 @@ __all__ = [
     "AgentResult",
     "ChatMessage",
     "create_provider",
+    "ensure_api_key",
     "tool_registry",
 ]
