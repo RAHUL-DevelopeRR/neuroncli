@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from .config import AgentConfig
@@ -82,13 +83,25 @@ def _try_parse_json(raw: str) -> dict | None:
 
 
 def parse_tool_call(text: str) -> ParsedToolCall | None:
+    """Parse a single tool call (backward compat)."""
+    calls = parse_all_tool_calls(text)
+    return calls[0] if calls else None
+
+
+def parse_all_tool_calls(text: str) -> list[ParsedToolCall]:
+    """Parse ALL tool calls from a response — enables parallel execution."""
+    calls = []
+    seen = set()
+
     for pattern in [TOOL_CALL_PATTERN, CODE_BLOCK_TOOL_PATTERN, BARE_JSON_TOOL_PATTERN]:
-        match = pattern.search(text)
-        if match:
+        for match in pattern.finditer(text):
             data = _try_parse_json(match.group(1))
             if data:
-                return ParsedToolCall(tool=data["tool"], args=data.get("args", {}))
-    return None
+                key = (data["tool"], json.dumps(data.get("args", {}), sort_keys=True))
+                if key not in seen:
+                    seen.add(key)
+                    calls.append(ParsedToolCall(tool=data["tool"], args=data.get("args", {})))
+    return calls
 
 
 def parse_final_answer(text: str) -> str | None:
@@ -102,13 +115,39 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r'\033\[[0-9;]*m', '', text)
 
 
+def _clean_for_display(text: str) -> str:
+    """Clean LLM output for end-user display:
+    1. Strip all XML-like tags (<final_answer>, <tool_call>, etc.)
+    2. Render markdown bold/italic as ANSI
+    3. Clean up extra whitespace
+    """
+    # Strip XML tags completely
+    text = re.sub(r'</?final_answer>', '', text)
+    text = re.sub(r'</?tool_call>', '', text)
+    text = re.sub(r'<[a-z_/][^>]*>', '', text)  # any remaining XML-like tags
+    # Strip phrases like "tags as instructed" or "as instructed"
+    text = re.sub(r'(?i)\b(tags? as instructed|as instructed)\.?\s*', '', text)
+    # Render markdown bold **text** → ANSI bold
+    text = re.sub(r'\*\*(.+?)\*\*', f'{C.BOLD}\\1{C.RESET}', text)
+    # Render markdown italic *text* → ANSI italic (only single *)
+    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', f'{C.DIM}\\1{C.RESET}', text)
+    # Render inline code `text` → dim
+    text = re.sub(r'`([^`]+)`', f'{C.CYAN}\\1{C.RESET}', text)
+    # Render markdown headers ### → bold
+    text = re.sub(r'^#{1,3}\s+(.+)$', f'{C.BOLD}\\1{C.RESET}', text, flags=re.MULTILINE)
+    # Render bullet points - → •
+    text = re.sub(r'^(\s*)- ', r'\1  • ', text, flags=re.MULTILINE)
+    # Clean up multiple blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 # ── Compact Tool Summaries ────────────────────────────────────────
 
 def _tool_summary(tool_name: str, tool_args: dict, result: str) -> str:
     """Generate a Claude Code-style one-liner summary for a tool call."""
     if tool_name == "read_file":
         path = tool_args.get("path", "?")
-        # Count lines in result
         lines = result.count('\n')
         return f"  Read {path} ({lines} lines)"
 
@@ -129,10 +168,8 @@ def _tool_summary(tool_name: str, tool_args: dict, result: str) -> str:
 
     elif tool_name == "run_command":
         cmd = tool_args.get("command", "?")
-        # Truncate long commands
         if len(cmd) > 60:
             cmd = cmd[:57] + "..."
-        exit_code = "0" if "error" not in result.lower() else "1"
         return f"  Ran: {cmd}"
 
     elif tool_name in ("list_directory", "get_project_structure"):
@@ -147,6 +184,22 @@ def _tool_summary(tool_name: str, tool_args: dict, result: str) -> str:
 
     else:
         return f"  {tool_name}({', '.join(f'{k}={v!r}' for k, v in tool_args.items())})"
+
+
+def _truncate_result(result: str, max_chars: int = 4000) -> str:
+    """Truncate long tool results to save context window.
+    This is key to reducing reasoning time — smaller context = faster inference.
+    """
+    if len(result) <= max_chars:
+        return result
+    # Keep first and last portions to preserve structure
+    half = max_chars // 2
+    truncated = (
+        result[:half]
+        + f"\n\n... [{len(result) - max_chars} chars truncated] ...\n\n"
+        + result[-half:]
+    )
+    return truncated
 
 
 def _format_diff(path: str, old_text: str, new_text: str) -> str:
@@ -278,6 +331,7 @@ class Agent:
             if final:
                 # Clear the thinking indicator
                 print(f"\r{' ' * 80}\r", end="")
+                display_text = _clean_for_display(final)
                 step = AgentStep(
                     step_number=iteration,
                     thinking=clean_response,
@@ -289,79 +343,129 @@ class Agent:
                 )
                 result.steps.append(step)
                 result.final_answer = final
-                # Print clean answer
-                print(f"\n{final}\n")
+                # Print clean, formatted answer
+                print(f"\n{display_text}\n")
                 break
 
-            # ── Check for tool call ───────────────────────────
-            tool_call = parse_tool_call(clean_response)
-            if tool_call:
-                # Permission check for destructive tools
-                needs_confirm = (
-                    self.config.confirm_dangerous
-                    and tool_call.tool in ("write_file", "edit_file", "run_command")
-                )
+            # ── Check for tool calls (PARALLEL) ─────────────────
+            all_tool_calls = parse_all_tool_calls(clean_response)
+            if all_tool_calls:
+                # Separate safe (read-only) vs dangerous (write/execute) calls
+                safe_calls = []
+                dangerous_calls = []
+                for tc in all_tool_calls:
+                    if tc.tool in ("write_file", "edit_file", "run_command"):
+                        dangerous_calls.append(tc)
+                    else:
+                        safe_calls.append(tc)
 
-                if needs_confirm and tool_call.tool == "write_file" and not self._auto_approve_writes:
-                    print(f"\r{' ' * 80}\r", end="")
-                    if not _confirm_action(tool_call.tool, tool_call.args):
-                        self.messages.append(ChatMessage(role="user", content="[User denied this action. Try a different approach or ask for clarification.]"))
-                        continue
+                # Execute safe calls in PARALLEL
+                all_results = []
+                if safe_calls:
+                    with ThreadPoolExecutor(max_workers=min(len(safe_calls), 4)) as pool:
+                        futures = {
+                            pool.submit(
+                                tool_registry.execute, tc.tool, tc.args, self.config
+                            ): tc
+                            for tc in safe_calls
+                        }
+                        for future in as_completed(futures):
+                            tc = futures[future]
+                            try:
+                                tool_result = future.result()
+                            except Exception as e:
+                                tool_result = f"Error: {e}"
+                            summary = _tool_summary(tc.tool, tc.args, tool_result)
+                            print(f"\r{' ' * 80}\r{C.GREEN}{summary}{C.RESET}")
+                            all_results.append((tc, tool_result))
 
-                if needs_confirm and tool_call.tool == "edit_file" and not self._auto_approve_writes:
-                    print(f"\r{' ' * 80}\r", end="")
-                    if not _confirm_action(tool_call.tool, tool_call.args):
-                        self.messages.append(ChatMessage(role="user", content="[User denied this action. Try a different approach or ask for clarification.]"))
-                        continue
+                # Execute dangerous calls sequentially (with permission)
+                for tc in dangerous_calls:
+                    needs_confirm = self.config.confirm_dangerous
 
-                if needs_confirm and tool_call.tool == "run_command":
-                    cmd = tool_call.args.get("command", "")
-                    if self.config.is_dangerous_command(cmd) and not self._auto_approve_commands:
+                    if needs_confirm and tc.tool in ("write_file", "edit_file") and not self._auto_approve_writes:
                         print(f"\r{' ' * 80}\r", end="")
-                        if not _confirm_action(tool_call.tool, tool_call.args):
-                            self.messages.append(ChatMessage(role="user", content="[User denied this command. Try something safer.]"))
+                        if not _confirm_action(tc.tool, tc.args):
+                            all_results.append((tc, "[User denied]"))
                             continue
 
-                # Execute the tool
-                tool_result = tool_registry.execute(
-                    tool_call.tool,
-                    tool_call.args,
-                    self.config,
-                )
+                    if needs_confirm and tc.tool == "run_command":
+                        cmd = tc.args.get("command", "")
+                        if self.config.is_dangerous_command(cmd) and not self._auto_approve_commands:
+                            print(f"\r{' ' * 80}\r", end="")
+                            if not _confirm_action(tc.tool, tc.args):
+                                all_results.append((tc, "[User denied]"))
+                                continue
 
-                # Show compact one-liner
-                summary = _tool_summary(tool_call.tool, tool_call.args, tool_result)
-                print(f"\r{' ' * 80}\r{C.GREEN}{summary}{C.RESET}")
+                    tool_result = tool_registry.execute(tc.tool, tc.args, self.config)
+                    summary = _tool_summary(tc.tool, tc.args, tool_result)
+                    print(f"\r{' ' * 80}\r{C.GREEN}{summary}{C.RESET}")
 
-                # Show diff for edit operations
-                if tool_call.tool == "edit_file" and "✓" in tool_result:
-                    old_text = tool_call.args.get("old_text", "")
-                    new_text = tool_call.args.get("new_text", "")
-                    if old_text and new_text and not needs_confirm:
-                        diff = _format_diff(tool_call.args.get("path", "?"), old_text, new_text)
-                        print(diff)
+                    # Show diff for edit operations
+                    if tc.tool == "edit_file" and "done" in tool_result.lower():
+                        old_text = tc.args.get("old_text", "")
+                        new_text = tc.args.get("new_text", "")
+                        if old_text and new_text and not needs_confirm:
+                            diff = _format_diff(tc.args.get("path", "?"), old_text, new_text)
+                            print(diff)
 
-                # Inject result back
+                    all_results.append((tc, tool_result))
+
+                # Build combined result message for LLM
+                result_parts = []
+                for tc, tr in all_results:
+                    truncated = _truncate_result(tr)
+                    result_parts.append(f"[Tool: {tc.tool}] {truncated}")
+
+                combined_result = "\n---\n".join(result_parts)
                 result_message = (
-                    f"[Tool Result: {tool_call.tool}]\n{tool_result}\n\n"
-                    f"Analyze this result and decide your next action. "
+                    f"{combined_result}\n\n"
+                    f"Analyze these results and decide your next action. "
                     f"If the task is complete, provide your <final_answer>. "
-                    f"Otherwise, use another tool."
+                    f"Otherwise, use more tools. You can call MULTIPLE tools "
+                    f"in one response for parallel execution."
                 )
                 self.messages.append(ChatMessage(role="user", content=result_message))
 
                 step = AgentStep(
                     step_number=iteration,
                     thinking=clean_response,
-                    tool_call=tool_call,
-                    tool_result=tool_result,
+                    tool_call=all_tool_calls[0],  # Primary call for tracking
+                    tool_result=combined_result,
                     is_final=False,
                     elapsed=time.time() - step_start,
                 )
                 result.steps.append(step)
                 continue
 
-            # ── No tool call and no final answer → nudge ──────
+            # ── No tool call and no final answer ─────────────
+            # If the response looks like a conversational reply (not a
+            # confused attempt at tool use), treat it as the final answer
+            # instead of nudging — this prevents the extra round-trip.
+            stripped = clean_response.strip()
+            looks_like_answer = (
+                len(stripped) > 20
+                and not stripped.startswith('{')
+                and 'tool' not in stripped[:30].lower()
+            )
+            if looks_like_answer:
+                display_text = _clean_for_display(stripped)
+                print(f"\r{' ' * 80}\r", end="")
+                print(f"\n{display_text}\n")
+                step = AgentStep(
+                    step_number=iteration,
+                    thinking=clean_response,
+                    tool_call=None,
+                    tool_result="",
+                    is_final=True,
+                    final_answer=stripped,
+                    elapsed=time.time() - step_start,
+                )
+                result.steps.append(step)
+                result.final_answer = stripped
+                break
+
+            # Otherwise nudge the LLM
             nudge = (
                 "You didn't use a tool or provide a final answer. "
                 "Please either:\n"

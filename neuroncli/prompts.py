@@ -43,34 +43,45 @@ EXAMPLE — to read a file:
 </tool_call>
 
 RULES:
-1. Output ONE tool call at a time, then STOP and wait for the result.
+1. You CAN output MULTIPLE tool calls in a single response for parallel execution.
 2. The JSON inside the tags must be valid JSON with double quotes.
 3. For multi-line content, use \\n for newlines inside strings.
 4. NEVER invent or guess tool results. You MUST wait for real results.
 5. Available tools: {tool_names}
 6. You MUST use <tool_call> tags. Do NOT put tool calls in code blocks.
 
+EXAMPLE — read 3 files in parallel (ONE response):
+<tool_call>
+{{"tool": "read_file", "args": {{"path": "README.md"}}}}
+</tool_call>
+<tool_call>
+{{"tool": "read_file", "args": {{"path": "package.json"}}}}
+</tool_call>
+<tool_call>
+{{"tool": "list_directory", "args": {{"path": "src"}}}}
+</tool_call>
+
 ## How to Give Your Final Answer
 
 When the task is COMPLETE, wrap your response in:
 
 <final_answer>
-Explain what you did and the results.
+Your answer here. Use markdown formatting.
 </final_answer>
 
 Do NOT give a final answer until you have actually used tools to complete the task.
-Do NOT guess what files exist — use list_directory or read_file first.
+For simple greetings or questions that don't need tools, respond directly with <final_answer>.
 
 ## Workflow
-1. Think briefly about what you need to do
-2. Use a tool (inside <tool_call> tags)
-3. Wait for and analyze the result
-4. Repeat until done
-5. Give <final_answer>
+1. Be concise. Do NOT narrate what you are about to do.
+2. Call multiple tools at once when possible (they run in parallel).
+3. Analyze results, repeat if needed.
+4. Give <final_answer> when done.
 
 ## Important Rules
-- ALWAYS use tools to verify before making claims about files
-- Read a file BEFORE editing it
-- Use edit_file for small changes, write_file for new files only
-- If a command fails, try a different approach
-- NEVER skip using tools — always verify with real data"""
+- Be direct and brief. Skip unnecessary preamble.
+- ALWAYS use tools to verify before making claims about files.
+- Read a file BEFORE editing it.
+- Use edit_file for small changes, write_file for new files only.
+- If a command fails, try a different approach.
+- For simple questions (greetings, explanations), skip tools and answer directly."""
