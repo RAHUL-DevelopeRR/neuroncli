@@ -9,11 +9,8 @@
 ## Install
 
 ```bash
-# Windows
-pip install neuroncli
-
-# Linux / macOS (one command — no sudo, no pipx needed)
-curl -fsSL https://raw.githubusercontent.com/RAHUL-DevelopeRR/neuroncli/master/install.sh | bash
+pip install neuroncli                          # Windows / macOS / Cloud VMs
+pip install neuroncli --break-system-packages  # Linux (Ubuntu 23+, Debian 12+, Fedora 38+)
 ```
 
 ## Quick Start
