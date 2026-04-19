@@ -13,6 +13,11 @@ from .config import AgentConfig, MODE_YOLO, MODE_PLAN
 from .provider import ChatMessage, create_provider, ProviderConnectionError
 from .prompts import build_system_prompt
 from .tools import registry as tool_registry
+from .ui import (
+    _ORANGE, _GREEN, _RED, _GRAY, _BLUE, _YELLOW,
+    RST, BOLD, DIM,
+    SYM_BULLET, SYM_THINK, SYM_OK, SYM_ERR, SYM_ARROW,
+)
 
 
 # ── ANSI Colors ───────────────────────────────────────────────────
@@ -90,17 +95,68 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r'\033\[[0-9;]*m', '', text)
 
 
+def _render_table(table_text: str) -> str:
+    """Convert markdown table to clean aligned terminal text."""
+    lines = table_text.strip().split('\n')
+    rows = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('|') is False:
+            continue
+        # Skip separator rows (|---|---|)
+        if re.match(r'^\|[\s:|-]+\|$', line):
+            continue
+        cells = [c.strip() for c in line.strip('|').split('|')]
+        rows.append(cells)
+    if not rows:
+        return table_text
+
+    # Calculate column widths
+    cols = max(len(r) for r in rows)
+    widths = [0] * cols
+    for row in rows:
+        for i, cell in enumerate(row):
+            if i < cols:
+                widths[i] = max(widths[i], len(cell))
+
+    # Render
+    output = []
+    for idx, row in enumerate(rows):
+        parts = []
+        for i in range(cols):
+            cell = row[i] if i < len(row) else ''
+            if idx == 0:  # Header row
+                parts.append(f"{BOLD}{cell:<{widths[i]}}{RST}")
+            else:
+                parts.append(f"{cell:<{widths[i]}}")
+        output.append('  ' + '  '.join(parts))
+        if idx == 0:
+            output.append('  ' + '  '.join('-' * w for w in widths))
+    return '\n'.join(output)
+
+
 def _clean_for_display(text: str) -> str:
-    """Strip XML tags, render markdown as ANSI for terminal display."""
+    """Strip XML tags, render markdown as ANSI for terminal display.
+    Handles: bold, italic, code, headers, bullets, and TABLES."""
+    # Strip XML tags
     text = re.sub(r'</?final_answer>', '', text)
     text = re.sub(r'</?tool_call>', '', text)
     text = re.sub(r'<[a-z_/][^>]*>', '', text)
     text = re.sub(r'(?i)\b(tags? as instructed|as instructed)\.?\s*', '', text)
-    text = re.sub(r'\*\*(.+?)\*\*', f'{C.BOLD}\\1{C.RESET}', text)
-    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', f'{C.DIM}\\1{C.RESET}', text)
+
+    # Render markdown tables
+    table_pattern = re.compile(
+        r'((?:^\|.+\|$\n?){2,})',
+        re.MULTILINE
+    )
+    text = table_pattern.sub(lambda m: _render_table(m.group(1)), text)
+
+    # Render markdown formatting as ANSI
+    text = re.sub(r'\*\*(.+?)\*\*', f'{BOLD}\\1{RST}', text)
+    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', f'{DIM}\\1{RST}', text)
     text = re.sub(r'`([^`]+)`', f'{C.CYAN}\\1{C.RESET}', text)
-    text = re.sub(r'^#{1,3}\s+(.+)$', f'{C.BOLD}\\1{C.RESET}', text, flags=re.MULTILINE)
-    text = re.sub(r'^(\s*)- ', lambda m: m.group(1) + '  \u2022 ', text, flags=re.MULTILINE)
+    text = re.sub(r'^#{1,3}\s+(.+)$', f'{BOLD}\\1{RST}', text, flags=re.MULTILINE)
+    text = re.sub(r'^(\s*)- ', lambda m: m.group(1) + '  . ', text, flags=re.MULTILINE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -255,9 +311,8 @@ class Agent:
                 self.messages = _compress_context(self.messages)
                 print(f"  {C.DIM}/compact: context compressed{C.RESET}")
 
-            # ── Show thinking indicator ───────────────────────
-            elapsed_so_far = time.time() - start_time
-            print(f"\r  {C.MAGENTA}*{C.RESET} {C.DIM}Thinking...{C.RESET}", end="", flush=True)
+            # ── Show thinking indicator (brand symbol) ───────
+            print(f"\r  {SYM_THINK} {DIM}Thinking...{RST}", end="", flush=True)
 
             # ── Get LLM response ──────────────────────────────
             full_response = ""
@@ -273,11 +328,11 @@ class Agent:
                             if len(hint) > 50:
                                 hint = hint[:47] + "..."
                             secs = time.time() - step_start
-                            print(f"\r  {C.MAGENTA}*{C.RESET} {C.DIM}{hint}... ({secs:.0f}s){C.RESET}    ", end="", flush=True)
+                            print(f"\r  {SYM_THINK} {DIM}{hint}... ({secs:.0f}s){RST}    ", end="", flush=True)
                 else:
                     full_response = self.client.chat(self.messages)
             except Exception as exc:
-                print(f"\r  {C.RED}X {exc}{C.RESET}")
+                print(f"\r  {SYM_ERR} {exc}")
                 result.aborted = True
                 break
 

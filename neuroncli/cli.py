@@ -12,6 +12,7 @@ from .provider import create_provider
 from .ui import (
     render_startup_screen, _neuron_text, _ORANGE, _GREEN, _RED, _GRAY,
     RST, BOLD, DIM,
+    SYM_OK, SYM_ERR, SYM_PROMPT,
 )
 
 
