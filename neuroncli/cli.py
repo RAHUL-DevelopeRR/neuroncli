@@ -1,4 +1,4 @@
-"""NeuronCLI — CLI entry point. Claude Code-style interface. v1.1"""
+"""NeuronCLI — CLI v2.0. Full Claude Code-style interface with modes and trust prompt."""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ import os
 import sys
 
 from .agent import Agent
-from .config import VERSION, AgentConfig
+from .config import VERSION, AgentConfig, MODE_STANDARD, MODE_PLAN, MODE_YOLO
 from .provider import create_provider
 from .ui import (
-    render_startup_screen, _neuron_text, _GRAY, _ORANGE, _GREEN, _RED,
-    RST, BOLD, DIM, bullet, sub_item, error_line, success_line,
+    render_startup_screen, _neuron_text, _ORANGE, _GREEN, _RED, _GRAY,
+    RST, BOLD, DIM,
 )
 
 
@@ -28,12 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", "-p", choices=["openrouter", "ollama"],
                         default=None, help="LLM provider")
     parser.add_argument("--dir", "-d", default=None, help="Working directory")
-    parser.add_argument("--max-iter", type=int, default=None,
-                        help="Max agent iterations (default: 15)")
-    parser.add_argument("--no-stream", action="store_true",
-                        help="Disable streaming")
-    parser.add_argument("--no-confirm", action="store_true",
-                        help="Skip confirmation prompts (YOLO mode)")
+    parser.add_argument("--max-iter", type=int, default=None)
+    parser.add_argument("--no-stream", action="store_true")
+    parser.add_argument("--yolo", action="store_true",
+                        help="YOLO mode — skip all permission prompts")
+    parser.add_argument("--plan", action="store_true",
+                        help="Plan mode — reason and plan before coding")
     parser.add_argument("--version", action="version",
                         version=f"NeuronCLI v{VERSION}")
     return parser
@@ -42,7 +42,6 @@ def build_parser() -> argparse.ArgumentParser:
 # ── NEURON.md Support ─────────────────────────────────────────────
 
 def _find_neuron_md(working_dir: str) -> str | None:
-    """Look for NEURON.md in the working directory."""
     p = os.path.join(working_dir, "NEURON.md")
     if os.path.isfile(p):
         try:
@@ -54,7 +53,6 @@ def _find_neuron_md(working_dir: str) -> str | None:
 
 
 def _create_neuron_md(working_dir: str) -> None:
-    """Create a default NEURON.md template."""
     template = """# NEURON.md — Project Context for NeuronCLI
 
 ## Project Overview
@@ -67,14 +65,14 @@ def _create_neuron_md(working_dir: str) -> None:
 <!-- Outline the key directories and files -->
 
 ## Rules
-<!-- Add workflow rules for the AI agent -->
+<!-- Workflow rules for the AI agent -->
 <!-- Examples: -->
 <!-- - Always create a git branch before making changes -->
 <!-- - Run tests after editing code -->
 <!-- - Use TypeScript, not JavaScript -->
 
 ## Notes
-<!-- Any additional context the AI should know -->
+<!-- Any additional context -->
 """
     path = os.path.join(working_dir, "NEURON.md")
     with open(path, "w", encoding="utf-8") as f:
@@ -83,29 +81,74 @@ def _create_neuron_md(working_dir: str) -> None:
     print(f"  {DIM}Edit it to give NeuronCLI context about your project.{RST}\n")
 
 
+# ── Trust Prompt ──────────────────────────────────────────────────
+
+def _check_trust(working_dir: str) -> bool:
+    """Check if user trusts this directory (first-run security prompt)."""
+    trust_file = os.path.join(os.path.expanduser("~"), ".neuroncli", "trusted_dirs.txt")
+    os.makedirs(os.path.dirname(trust_file), exist_ok=True)
+
+    # Check if already trusted
+    if os.path.isfile(trust_file):
+        with open(trust_file, "r") as f:
+            trusted = [line.strip() for line in f.readlines()]
+            if working_dir in trusted:
+                return True
+
+    # Ask user to trust
+    print(f"\n  {_ORANGE}{BOLD}Security Check{RST}")
+    print(f"  {DIM}NeuronCLI can read, write, and execute commands in:{RST}")
+    print(f"  {BOLD}{working_dir}{RST}\n")
+
+    try:
+        response = input(f"  {_ORANGE}Press 1 to trust this directory:{RST} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+    if response == "1":
+        with open(trust_file, "a") as f:
+            f.write(working_dir + "\n")
+        print(f"  {_GREEN}{BOLD}v{RST} Directory trusted.\n")
+        return True
+    else:
+        print(f"  {_RED}X{RST} Directory not trusted. Exiting.\n")
+        return False
+
+
+# ── Mode Display ──────────────────────────────────────────────────
+
+_MODE_LABELS = {
+    MODE_STANDARD: "",
+    MODE_PLAN:     f" {_ORANGE}[plan]{RST}",
+    MODE_YOLO:     f" {_RED}[yolo]{RST}",
+}
+
+
 # ── Interactive REPL ──────────────────────────────────────────────
 
 def run_repl(config: AgentConfig):
-    """Interactive session — Claude Code-style."""
-    agent = Agent(config)
-
-    # Check for NEURON.md
+    """Interactive session — full Claude Code-style experience."""
     neuron_md = _find_neuron_md(config.working_dir)
-    has_neuron_md = neuron_md is not None
+    agent = Agent(config)
 
     # Render startup screen
     startup = render_startup_screen(
         working_dir=config.working_dir,
         provider=config.provider,
         model=config.active_model,
-        neuron_md_exists=has_neuron_md,
+        neuron_md_exists=neuron_md is not None,
     )
     print(startup)
-    print()
+
+    # Mode indicator
+    mode_label = _MODE_LABELS.get(config.mode, "")
+    print(f"  {DIM}Type a task, /help for commands, /exit to quit.{RST}{mode_label}\n")
 
     while True:
         try:
-            user_input = input(f"  {_ORANGE}{BOLD}>{RST} ").strip()
+            mode_tag = _MODE_LABELS.get(config.mode, "")
+            prompt_text = f"  {_ORANGE}{BOLD}>{RST}{mode_tag} "
+            user_input = input(prompt_text).strip()
             if not user_input:
                 continue
 
@@ -114,11 +157,13 @@ def run_repl(config: AgentConfig):
                 result = _handle_command(user_input, agent, config)
                 if result == "exit":
                     break
+                # Refresh neuron_md in case /init was run
+                neuron_md = _find_neuron_md(config.working_dir)
                 continue
 
             # Execute task
             print()
-            agent.run(user_input)
+            agent.run(user_input, neuron_md=neuron_md)
 
         except KeyboardInterrupt:
             print(f"\n  {DIM}(interrupted){RST}")
@@ -130,7 +175,6 @@ def run_repl(config: AgentConfig):
 
 
 def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
-    """Handle slash commands."""
     parts = cmd.split(maxsplit=1)
     command = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
@@ -145,9 +189,12 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
     {_ORANGE}/exit{RST}              Exit NeuronCLI
     {_ORANGE}/init{RST}              Create NEURON.md project context
     {_ORANGE}/clear{RST}             Clear conversation history
+    {_ORANGE}/compact{RST}           Compress context (free up memory)
+    {_ORANGE}/mode <mode>{RST}       Switch mode: standard, plan, yolo
     {_ORANGE}/model <name>{RST}      Switch model
     {_ORANGE}/models{RST}            List available models
     {_ORANGE}/provider <name>{RST}   Switch provider (openrouter/ollama)
+    {_ORANGE}/upgrade{RST}           Info on faster response times
     {_ORANGE}/login{RST}             Re-authenticate with OpenRouter
     {_ORANGE}/logout{RST}            Remove stored API key
     {_ORANGE}/dir <path>{RST}        Change working directory
@@ -161,6 +208,48 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
     elif command == "/clear":
         agent.clear_history()
         print(f"  {_GREEN}{BOLD}v{RST} History cleared.\n")
+
+    elif command == "/compact":
+        removed = agent.compact()
+        if removed > 0:
+            print(f"  {_GREEN}{BOLD}v{RST} Context compressed ({removed} messages removed).\n")
+        else:
+            print(f"  {DIM}Context is already compact.{RST}\n")
+
+    elif command == "/mode":
+        if not arg:
+            print(f"  Mode: {BOLD}{config.mode}{RST}")
+            print(f"  {DIM}Options: standard, plan, yolo{RST}\n")
+        else:
+            new_mode = arg.strip().lower()
+            if new_mode in (MODE_STANDARD, MODE_PLAN, MODE_YOLO):
+                config.mode = new_mode
+                label = _MODE_LABELS.get(new_mode, "")
+                print(f"  {_GREEN}{BOLD}v{RST} Mode: {BOLD}{new_mode}{RST}{label}\n")
+            else:
+                print(f"  {_RED}X{RST} Unknown mode. Use: standard, plan, yolo\n")
+
+    elif command == "/upgrade":
+        print(f"""
+  {BOLD}Faster Responses{RST}
+
+  The free tier routes through OpenRouter's shared queue,
+  which can be slow during peak hours.
+
+  {_ORANGE}Option 1: Moonshot Direct ($1 one-time){RST}
+    Sign up at platform.moonshot.ai
+    $1 recharge = ~230 fast tasks
+    Set: NEURON_PROVIDER=moonshot
+
+  {_ORANGE}Option 2: Local Ollama (free, offline){RST}
+    Install from ollama.com
+    Run: ollama pull qwen2.5-coder:7b
+    Use: neuron --provider ollama
+
+  {_ORANGE}Option 3: Self-host Kimi K2.5{RST}
+    Requires a GPU with 48GB+ VRAM
+    Fastest possible, zero API cost
+""")
 
     elif command == "/model":
         if not arg:
@@ -237,6 +326,7 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
   {BOLD}Configuration:{RST}
     Provider:       {config.provider}
     Model:          {config.active_model}
+    Mode:           {config.mode}
     Temperature:    {config.temperature}
     Max Tokens:     {config.max_tokens}
     Max Iterations: {config.max_iterations}
@@ -255,7 +345,7 @@ def _handle_command(cmd: str, agent: Agent, config: AgentConfig) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     if sys.platform == "win32":
-        os.system("")  # Enable ANSI
+        os.system("")
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -279,8 +369,11 @@ def main(argv: list[str] | None = None) -> int:
         config.max_iterations = args.max_iter
     if args.no_stream:
         config.streaming = False
-    if args.no_confirm:
+    if args.yolo:
+        config.mode = MODE_YOLO
         config.confirm_dangerous = False
+    if args.plan:
+        config.mode = MODE_PLAN
 
     # Check provider
     client = create_provider(config)
@@ -293,12 +386,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {DIM}Start with: ollama serve{RST}\n")
         return 1
 
+    # Trust check for REPL mode
+    if not args.task and not _check_trust(config.working_dir):
+        return 1
+
     if args.task:
-        # One-shot mode — compact header
+        # One-shot mode
         model_short = config.active_model.split("/")[-1]
-        print(f"\n  {_neuron_text()} {DIM}v{VERSION} | {config.provider} | {model_short}{RST}\n")
+        mode_tag = f" [{config.mode}]" if config.mode != "standard" else ""
+        print(f"\n  {_neuron_text()} {DIM}v{VERSION} | {config.provider} | {model_short}{mode_tag}{RST}\n")
+        neuron_md = _find_neuron_md(config.working_dir)
         agent = Agent(config)
-        result = agent.run(args.task)
+        result = agent.run(args.task, neuron_md=neuron_md)
         return 0 if not result.aborted else 1
     else:
         run_repl(config)

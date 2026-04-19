@@ -1,4 +1,4 @@
-"""NeuronCLI — Configuration module. v1.1 with OpenRouter + Ollama dual-provider."""
+"""NeuronCLI — Configuration module. v2.0 with modes, context management, and hybrid pricing."""
 
 from __future__ import annotations
 from .auth import ensure_api_key
@@ -6,6 +6,12 @@ from .auth import ensure_api_key
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+# ── Operational Modes ─────────────────────────────────────────────
+MODE_STANDARD = "standard"    # Ask permission for writes/commands
+MODE_PLAN     = "plan"        # Plan first, then execute after approval
+MODE_YOLO     = "yolo"        # Skip all permission prompts
 
 
 @dataclass
@@ -23,10 +29,10 @@ class AgentConfig:
     # ── Ollama Settings (fallback) ────────────────────────────────
     ollama_model: str = "qwen2.5-coder:7b"
     base_url: str = "http://localhost:11434"
-    num_ctx: int = 8192               # Context window (tokens)
+    num_ctx: int = 8192
 
     # ── Shared LLM Settings ──────────────────────────────────────
-    temperature: float = 0.2          # Low = more precise code output
+    temperature: float = 0.2
     top_p: float = 0.9
 
     # ── Agent Behavior ────────────────────────────────────────────
@@ -34,6 +40,12 @@ class AgentConfig:
     streaming: bool = True            # Stream tokens to terminal
     confirm_dangerous: bool = True    # Ask before destructive commands
     show_thinking: bool = True        # Show reasoning tokens (K2.5)
+    mode: str = MODE_STANDARD         # standard / plan / yolo
+
+    # ── Context Management ────────────────────────────────────────
+    context_warn_percent: float = 0.85     # Warn at 85% context usage
+    context_compress_percent: float = 0.92 # Auto-compress at 92%
+    max_context_tokens: int = 128000       # K2.5 supports 128k
 
     # ── Working Directory ─────────────────────────────────────────
     working_dir: str = field(default_factory=lambda: os.getcwd())
@@ -51,11 +63,8 @@ class AgentConfig:
     def from_env(cls) -> "AgentConfig":
         """Build config from environment variables with defaults."""
         provider = os.environ.get("NEURON_PROVIDER", "openrouter")
-
-        # Get API key through the auth chain (env var → config file → OAuth)
         api_key = ensure_api_key() or ""
 
-        # If no API key and provider is openrouter, fall back to ollama
         if provider == "openrouter" and not api_key:
             provider = "ollama"
 
@@ -76,34 +85,28 @@ class AgentConfig:
         )
 
     def resolve_path(self, path: str) -> Path:
-        """Resolve a relative path against the working directory."""
         p = Path(path)
         if p.is_absolute():
             return p
         return Path(self.working_dir) / p
 
     def is_dangerous_command(self, cmd: str) -> bool:
-        """Check if a command matches any dangerous pattern."""
         lower = cmd.lower().strip()
         return any(pat in lower for pat in self.dangerous_patterns)
 
     @property
     def active_model(self) -> str:
-        """Return the active model name depending on provider."""
         if self.provider == "ollama":
             return self.ollama_model
         return self.model
+
+    @property
+    def needs_confirmation(self) -> bool:
+        """Whether current mode requires user confirmation for writes."""
+        return self.mode == MODE_STANDARD and self.confirm_dangerous
 
 
 # ── App-wide constants ────────────────────────────────────────────
 
 APP_NAME = "NeuronCLI"
-VERSION = "1.1.0"
-BANNER = f"""
-\033[96m\033[1m╔══════════════════════════════════════════════════╗
-║                                                  ║
-║   >>  N E U R O N  C L I  v{VERSION}              ║
-║   AI Coding Agent · Kimi K2.5 + Ollama           ║
-║   zero-x Corporation                             ║
-║                                                  ║
-╚══════════════════════════════════════════════════╝\033[0m"""
+VERSION = "2.0.0"

@@ -1,4 +1,4 @@
-"""NeuronCLI — ReAct loop agent engine. Claude Code-style compact output."""
+"""NeuronCLI — ReAct agent engine v2.0. Parallel tools, context compression, hybrid speed."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-from .config import AgentConfig
+from .config import AgentConfig, MODE_YOLO, MODE_PLAN
 from .provider import ChatMessage, create_provider, ProviderConnectionError
 from .prompts import build_system_prompt
 from .tools import registry as tool_registry
@@ -30,43 +30,27 @@ class C:
     BLUE    = "\033[94m"
     GRAY    = "\033[90m"
     WHITE   = "\033[97m"
-    # Diff colors
-    DIFF_ADD = "\033[92m"   # Green
-    DIFF_DEL = "\033[91m"   # Red
-    DIFF_HDR = "\033[96m"   # Cyan
+    DIFF_ADD = "\033[92m"
+    DIFF_DEL = "\033[91m"
+    DIFF_HDR = "\033[96m"
 
 
 # ── Tool Call Parsing ─────────────────────────────────────────────
 
 TOOL_CALL_PATTERN = re.compile(
-    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
-    re.DOTALL,
-)
-
+    r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 CODE_BLOCK_TOOL_PATTERN = re.compile(
-    r"```(?:json)?\s*(\{[^`]*?\"tool\"\s*:.*?\})\s*```",
-    re.DOTALL,
-)
-
+    r"```(?:json)?\s*(\{[^`]*?\"tool\"\s*:.*?\})\s*```", re.DOTALL)
 BARE_JSON_TOOL_PATTERN = re.compile(
-    r'(\{\s*"tool"\s*:\s*"[^"]+"\s*,\s*"args"\s*:\s*\{.*?\}\s*\})',
-    re.DOTALL,
-)
-
+    r'(\{\s*"tool"\s*:\s*"[^"]+"\s*,\s*"args"\s*:\s*\{.*?\}\s*\})', re.DOTALL)
 FINAL_ANSWER_PATTERN = re.compile(
-    r"<final_answer>(.*?)</final_answer>",
-    re.DOTALL,
-)
+    r"<final_answer>(.*?)</final_answer>", re.DOTALL)
 
 
 @dataclass
 class ParsedToolCall:
     tool: str
     args: dict
-
-    def display(self) -> str:
-        args_str = ", ".join(f"{k}={v!r}" for k, v in self.args.items())
-        return f"{self.tool}({args_str})"
 
 
 def _try_parse_json(raw: str) -> dict | None:
@@ -82,17 +66,10 @@ def _try_parse_json(raw: str) -> dict | None:
     return None
 
 
-def parse_tool_call(text: str) -> ParsedToolCall | None:
-    """Parse a single tool call (backward compat)."""
-    calls = parse_all_tool_calls(text)
-    return calls[0] if calls else None
-
-
 def parse_all_tool_calls(text: str) -> list[ParsedToolCall]:
-    """Parse ALL tool calls from a response — enables parallel execution."""
+    """Parse ALL tool calls — enables parallel execution."""
     calls = []
     seen = set()
-
     for pattern in [TOOL_CALL_PATTERN, CODE_BLOCK_TOOL_PATTERN, BARE_JSON_TOOL_PATTERN]:
         for match in pattern.finditer(text):
             data = _try_parse_json(match.group(1))
@@ -106,9 +83,7 @@ def parse_all_tool_calls(text: str) -> list[ParsedToolCall]:
 
 def parse_final_answer(text: str) -> str | None:
     match = FINAL_ANSWER_PATTERN.search(text)
-    if match:
-        return match.group(1).strip()
-    return None
+    return match.group(1).strip() if match else None
 
 
 def _strip_ansi(text: str) -> str:
@@ -116,136 +91,110 @@ def _strip_ansi(text: str) -> str:
 
 
 def _clean_for_display(text: str) -> str:
-    """Clean LLM output for end-user display:
-    1. Strip all XML-like tags (<final_answer>, <tool_call>, etc.)
-    2. Render markdown bold/italic as ANSI
-    3. Clean up extra whitespace
-    """
-    # Strip XML tags completely
+    """Strip XML tags, render markdown as ANSI for terminal display."""
     text = re.sub(r'</?final_answer>', '', text)
     text = re.sub(r'</?tool_call>', '', text)
-    text = re.sub(r'<[a-z_/][^>]*>', '', text)  # any remaining XML-like tags
-    # Strip phrases like "tags as instructed" or "as instructed"
+    text = re.sub(r'<[a-z_/][^>]*>', '', text)
     text = re.sub(r'(?i)\b(tags? as instructed|as instructed)\.?\s*', '', text)
-    # Render markdown bold **text** → ANSI bold
     text = re.sub(r'\*\*(.+?)\*\*', f'{C.BOLD}\\1{C.RESET}', text)
-    # Render markdown italic *text* → ANSI italic (only single *)
     text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', f'{C.DIM}\\1{C.RESET}', text)
-    # Render inline code `text` → dim
     text = re.sub(r'`([^`]+)`', f'{C.CYAN}\\1{C.RESET}', text)
-    # Render markdown headers ### → bold
     text = re.sub(r'^#{1,3}\s+(.+)$', f'{C.BOLD}\\1{C.RESET}', text, flags=re.MULTILINE)
-    # Render bullet points - → •
-    text = re.sub(r'^(\s*)- ', r'\1  • ', text, flags=re.MULTILINE)
-    # Clean up multiple blank lines
+    text = re.sub(r'^(\s*)- ', lambda m: m.group(1) + '  \u2022 ', text, flags=re.MULTILINE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
-# ── Compact Tool Summaries ────────────────────────────────────────
+# ── Tool Summaries ────────────────────────────────────────────────
 
-def _tool_summary(tool_name: str, tool_args: dict, result: str) -> str:
-    """Generate a Claude Code-style one-liner summary for a tool call."""
-    if tool_name == "read_file":
-        path = tool_args.get("path", "?")
-        lines = result.count('\n')
-        return f"  Read {path} ({lines} lines)"
-
-    elif tool_name == "write_file":
-        path = tool_args.get("path", "?")
-        content = tool_args.get("content", "")
-        lines = content.count('\n') + 1
-        return f"  Wrote {path} ({lines} lines)"
-
-    elif tool_name == "edit_file":
-        path = tool_args.get("path", "?")
-        old = tool_args.get("old_text", "")
-        new = tool_args.get("new_text", "")
-        old_lines = old.count('\n') + 1 if old else 0
-        new_lines = new.count('\n') + 1 if new else 0
-        diff = f"+{new_lines} -{old_lines}"
-        return f"  Edited {path} ({diff})"
-
-    elif tool_name == "run_command":
-        cmd = tool_args.get("command", "?")
-        if len(cmd) > 60:
-            cmd = cmd[:57] + "..."
-        return f"  Ran: {cmd}"
-
-    elif tool_name in ("list_directory", "get_project_structure"):
-        path = tool_args.get("path", ".")
-        items = result.count('\n')
-        return f"  Listed {path} ({items} items)"
-
-    elif tool_name == "search_in_files":
-        pattern = tool_args.get("pattern", "?")
-        matches = result.count('\n')
-        return f"  Searched for \"{pattern}\" ({matches} matches)"
-
-    else:
-        return f"  {tool_name}({', '.join(f'{k}={v!r}' for k, v in tool_args.items())})"
+def _tool_summary(name: str, args: dict, result: str) -> str:
+    if name == "read_file":
+        return f"  Read {args.get('path', '?')} ({result.count(chr(10))} lines)"
+    elif name == "write_file":
+        lines = args.get('content', '').count('\n') + 1
+        return f"  Wrote {args.get('path', '?')} ({lines} lines)"
+    elif name == "edit_file":
+        old_n = args.get('old_text', '').count('\n') + 1 if args.get('old_text') else 0
+        new_n = args.get('new_text', '').count('\n') + 1 if args.get('new_text') else 0
+        return f"  Edited {args.get('path', '?')} (+{new_n} -{old_n})"
+    elif name == "run_command":
+        cmd = args.get('command', '?')
+        return f"  Ran: {cmd[:57] + '...' if len(cmd) > 60 else cmd}"
+    elif name in ("list_directory", "get_project_structure"):
+        return f"  Listed {args.get('path', '.')} ({result.count(chr(10))} items)"
+    elif name == "search_in_files":
+        return f"  Searched \"{args.get('pattern', '?')}\" ({result.count(chr(10))} matches)"
+    return f"  {name}()"
 
 
 def _truncate_result(result: str, max_chars: int = 4000) -> str:
-    """Truncate long tool results to save context window.
-    This is key to reducing reasoning time — smaller context = faster inference.
-    """
+    """Truncate tool results to keep context window lean."""
     if len(result) <= max_chars:
         return result
-    # Keep first and last portions to preserve structure
     half = max_chars // 2
-    truncated = (
-        result[:half]
-        + f"\n\n... [{len(result) - max_chars} chars truncated] ...\n\n"
-        + result[-half:]
-    )
-    return truncated
+    return result[:half] + f"\n\n... [{len(result) - max_chars} chars truncated] ...\n\n" + result[-half:]
 
 
 def _format_diff(path: str, old_text: str, new_text: str) -> str:
-    """Generate a Claude Code-style inline diff display."""
-    lines = []
-    lines.append(f"\n  {C.DIFF_HDR}{C.BOLD}  {path}{C.RESET}")
-    lines.append(f"  {C.DIM}  {'─' * min(len(path) + 4, 50)}{C.RESET}")
-
-    old_lines = old_text.splitlines() if old_text else []
-    new_lines = new_text.splitlines() if new_text else []
-
-    for line in old_lines:
+    lines = [f"\n  {C.DIFF_HDR}{C.BOLD}  {path}{C.RESET}",
+             f"  {C.DIM}  {'─' * min(len(path) + 4, 50)}{C.RESET}"]
+    for line in (old_text.splitlines() if old_text else []):
         lines.append(f"  {C.DIFF_DEL}  - {line}{C.RESET}")
-    for line in new_lines:
+    for line in (new_text.splitlines() if new_text else []):
         lines.append(f"  {C.DIFF_ADD}  + {line}{C.RESET}")
-
     return "\n".join(lines)
 
 
 def _confirm_action(tool_name: str, tool_args: dict) -> bool:
-    """Prompt user for permission before destructive operations."""
-    if tool_name == "write_file":
-        path = tool_args.get("path", "?")
-        prompt = f"\n  {C.YELLOW}● Write to {C.BOLD}{path}{C.RESET}{C.YELLOW}?{C.RESET} [Y/n] "
-    elif tool_name == "edit_file":
-        path = tool_args.get("path", "?")
-        # Show diff
-        old_text = tool_args.get("old_text", "")
-        new_text = tool_args.get("new_text", "")
-        diff = _format_diff(path, old_text, new_text)
-        print(diff)
+    """Permission prompt for destructive operations."""
+    if tool_name == "edit_file":
+        old, new = tool_args.get("old_text", ""), tool_args.get("new_text", "")
+        print(_format_diff(tool_args.get("path", "?"), old, new))
         prompt = f"\n  {C.YELLOW}Apply this edit?{C.RESET} [Y/n] "
+    elif tool_name == "write_file":
+        prompt = f"\n  {C.YELLOW}Write to {C.BOLD}{tool_args.get('path', '?')}{C.RESET}{C.YELLOW}?{C.RESET} [Y/n] "
     elif tool_name == "run_command":
-        cmd = tool_args.get("command", "?")
-        prompt = f"\n  {C.YELLOW}● Run: {C.BOLD}{cmd}{C.RESET}{C.YELLOW}?{C.RESET} [Y/n] "
+        prompt = f"\n  {C.YELLOW}Run: {C.BOLD}{tool_args.get('command', '?')}{C.RESET}{C.YELLOW}?{C.RESET} [Y/n] "
     else:
         return True
-
     try:
-        response = input(prompt).strip().lower()
-        return response in ("", "y", "yes")
+        r = input(prompt).strip().lower()
+        return r in ("", "y", "yes")
     except (EOFError, KeyboardInterrupt):
         return False
 
 
-# ── Agent Engine ──────────────────────────────────────────────────
+# ── Context Compression (H2A-style) ──────────────────────────────
+
+def _estimate_tokens(messages: list[ChatMessage]) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return sum(len(m.content) for m in messages) // 4
+
+
+def _compress_context(messages: list[ChatMessage], keep_system: bool = True) -> list[ChatMessage]:
+    """H2A-style context compression:
+    Keep system prompt (head) + last 4 messages (tail).
+    Summarize everything in the middle.
+    """
+    if len(messages) <= 6:
+        return messages
+
+    head = [messages[0]] if keep_system else []  # System prompt
+    tail = messages[-4:]  # Last 4 messages (recent context)
+    middle = messages[1:-4] if keep_system else messages[:-4]
+
+    # Summarize middle section
+    tool_calls = sum(1 for m in middle if "<tool_call>" in m.content or "[Tool:" in m.content)
+    summary = (
+        f"[Context compressed: {len(middle)} messages summarized. "
+        f"{tool_calls} tool operations were performed. "
+        f"Key context is preserved in recent messages below.]"
+    )
+    compressed = head + [ChatMessage(role="user", content=summary)] + tail
+    return compressed
+
+
+# ── Agent Data Types ──────────────────────────────────────────────
 
 @dataclass
 class AgentStep:
@@ -268,89 +217,92 @@ class AgentResult:
     aborted: bool = False
 
 
+# ── Agent Engine ──────────────────────────────────────────────────
+
 class Agent:
-    """
-    ReAct (Reasoning + Acting) loop agent.
-    Claude Code-style compact output — hides raw LLM text,
-    shows only tool summaries and clean final answer.
-    """
+    """ReAct agent with parallel tools, context compression, and mode support."""
 
     def __init__(self, config: AgentConfig | None = None):
         self.config = config or AgentConfig.from_env()
         self.client = create_provider(self.config)
         self.messages: list[ChatMessage] = []
-        self._auto_approve_writes = False
-        self._auto_approve_commands = False
+        self._slow_response_count = 0  # Track slow responses for upgrade nudge
 
-    def run(self, task: str) -> AgentResult:
+    def run(self, task: str, neuron_md: str | None = None) -> AgentResult:
         start_time = time.time()
         result = AgentResult(task=task)
 
-        system_prompt = build_system_prompt(tool_registry, self.config.working_dir)
-        self.messages = [
-            ChatMessage(role="system", content=system_prompt),
-            ChatMessage(role="user", content=task),
-        ]
+        system_prompt = build_system_prompt(
+            tool_registry, self.config.working_dir,
+            mode=self.config.mode, neuron_md=neuron_md,
+        )
+
+        # Preserve conversation history for follow-ups, but reset system prompt
+        if not self.messages:
+            self.messages = [ChatMessage(role="system", content=system_prompt)]
+        else:
+            self.messages[0] = ChatMessage(role="system", content=system_prompt)
+
+        self.messages.append(ChatMessage(role="user", content=task))
 
         for iteration in range(1, self.config.max_iterations + 1):
             step_start = time.time()
             result.iterations_used = iteration
 
-            # ── Show thinking indicator ───────────────────────
-            print(f"\r  {C.MAGENTA}●{C.RESET} {C.DIM}Thinking...{C.RESET}", end="", flush=True)
+            # ── Context compression check ─────────────────────
+            tokens_est = _estimate_tokens(self.messages)
+            if tokens_est > self.config.max_context_tokens * self.config.context_compress_percent:
+                self.messages = _compress_context(self.messages)
+                print(f"  {C.DIM}/compact: context compressed{C.RESET}")
 
-            # ── Get LLM response (silently) ───────────────────
+            # ── Show thinking indicator ───────────────────────
+            elapsed_so_far = time.time() - start_time
+            print(f"\r  {C.MAGENTA}*{C.RESET} {C.DIM}Thinking...{C.RESET}", end="", flush=True)
+
+            # ── Get LLM response ──────────────────────────────
             full_response = ""
             try:
                 if self.config.streaming:
-                    reasoning_shown = False
                     for token in self.client.chat_stream(self.messages):
                         full_response += token
-                        # Show a subtle spinner while streaming
-                        if not reasoning_shown:
-                            clean_so_far = _strip_ansi(full_response)
-                            # Update status with first few words of thinking
-                            words = clean_so_far.strip().split()[:6]
-                            if words:
-                                hint = " ".join(words)
-                                if len(hint) > 50:
-                                    hint = hint[:47] + "..."
-                                print(f"\r  {C.MAGENTA}●{C.RESET} {C.DIM}{hint}...{C.RESET}    ", end="", flush=True)
+                        # Dynamic status hint
+                        clean = _strip_ansi(full_response).strip()
+                        words = clean.split()[:6]
+                        if words:
+                            hint = " ".join(words)
+                            if len(hint) > 50:
+                                hint = hint[:47] + "..."
+                            secs = time.time() - step_start
+                            print(f"\r  {C.MAGENTA}*{C.RESET} {C.DIM}{hint}... ({secs:.0f}s){C.RESET}    ", end="", flush=True)
                 else:
                     full_response = self.client.chat(self.messages)
             except Exception as exc:
-                print(f"\r  {C.RED}✗ {exc}{C.RESET}")
+                print(f"\r  {C.RED}X {exc}{C.RESET}")
                 result.aborted = True
                 break
 
+            step_elapsed = time.time() - step_start
             clean_response = _strip_ansi(full_response)
             self.messages.append(ChatMessage(role="assistant", content=clean_response))
+
+            # ── Track slow responses for upgrade nudge ────────
+            if step_elapsed > 30:
+                self._slow_response_count += 1
 
             # ── Check for final answer ────────────────────────
             final = parse_final_answer(clean_response)
             if final:
-                # Clear the thinking indicator
                 print(f"\r{' ' * 80}\r", end="")
                 display_text = _clean_for_display(final)
-                step = AgentStep(
-                    step_number=iteration,
-                    thinking=clean_response,
-                    tool_call=None,
-                    tool_result="",
-                    is_final=True,
-                    final_answer=final,
-                    elapsed=time.time() - step_start,
-                )
+                step = AgentStep(iteration, clean_response, None, "", True, final, step_elapsed)
                 result.steps.append(step)
                 result.final_answer = final
-                # Print clean, formatted answer
                 print(f"\n{display_text}\n")
                 break
 
-            # ── Check for tool calls (PARALLEL) ─────────────────
+            # ── Check for tool calls (PARALLEL) ───────────────
             all_tool_calls = parse_all_tool_calls(clean_response)
             if all_tool_calls:
-                # Separate safe (read-only) vs dangerous (write/execute) calls
                 safe_calls = []
                 dangerous_calls = []
                 for tc in all_tool_calls:
@@ -359,14 +311,13 @@ class Agent:
                     else:
                         safe_calls.append(tc)
 
-                # Execute safe calls in PARALLEL
                 all_results = []
+
+                # Execute safe calls in PARALLEL
                 if safe_calls:
                     with ThreadPoolExecutor(max_workers=min(len(safe_calls), 4)) as pool:
                         futures = {
-                            pool.submit(
-                                tool_registry.execute, tc.tool, tc.args, self.config
-                            ): tc
+                            pool.submit(tool_registry.execute, tc.tool, tc.args, self.config): tc
                             for tc in safe_calls
                         }
                         for future in as_completed(futures):
@@ -379,139 +330,95 @@ class Agent:
                             print(f"\r{' ' * 80}\r{C.GREEN}{summary}{C.RESET}")
                             all_results.append((tc, tool_result))
 
-                # Execute dangerous calls sequentially (with permission)
+                # Execute dangerous calls sequentially
                 for tc in dangerous_calls:
-                    needs_confirm = self.config.confirm_dangerous
+                    yolo = self.config.mode == MODE_YOLO
 
-                    if needs_confirm and tc.tool in ("write_file", "edit_file") and not self._auto_approve_writes:
+                    if not yolo and self.config.needs_confirmation:
                         print(f"\r{' ' * 80}\r", end="")
                         if not _confirm_action(tc.tool, tc.args):
                             all_results.append((tc, "[User denied]"))
                             continue
 
-                    if needs_confirm and tc.tool == "run_command":
-                        cmd = tc.args.get("command", "")
-                        if self.config.is_dangerous_command(cmd) and not self._auto_approve_commands:
-                            print(f"\r{' ' * 80}\r", end="")
-                            if not _confirm_action(tc.tool, tc.args):
-                                all_results.append((tc, "[User denied]"))
-                                continue
-
                     tool_result = tool_registry.execute(tc.tool, tc.args, self.config)
                     summary = _tool_summary(tc.tool, tc.args, tool_result)
                     print(f"\r{' ' * 80}\r{C.GREEN}{summary}{C.RESET}")
 
-                    # Show diff for edit operations
+                    # Show diff for edits (in YOLO mode, show after applying)
                     if tc.tool == "edit_file" and "done" in tool_result.lower():
                         old_text = tc.args.get("old_text", "")
                         new_text = tc.args.get("new_text", "")
-                        if old_text and new_text and not needs_confirm:
-                            diff = _format_diff(tc.args.get("path", "?"), old_text, new_text)
-                            print(diff)
+                        if old_text and new_text and yolo:
+                            print(_format_diff(tc.args.get("path", "?"), old_text, new_text))
 
                     all_results.append((tc, tool_result))
 
-                # Build combined result message for LLM
-                result_parts = []
-                for tc, tr in all_results:
-                    truncated = _truncate_result(tr)
-                    result_parts.append(f"[Tool: {tc.tool}] {truncated}")
+                # Build result message
+                result_parts = [f"[Tool: {tc.tool}] {_truncate_result(tr)}" for tc, tr in all_results]
+                combined = "\n---\n".join(result_parts)
+                self.messages.append(ChatMessage(role="user", content=(
+                    f"{combined}\n\nAnalyze results. If done, give <final_answer>. "
+                    f"Otherwise, call more tools (multiple allowed for parallel execution)."
+                )))
 
-                combined_result = "\n---\n".join(result_parts)
-                result_message = (
-                    f"{combined_result}\n\n"
-                    f"Analyze these results and decide your next action. "
-                    f"If the task is complete, provide your <final_answer>. "
-                    f"Otherwise, use more tools. You can call MULTIPLE tools "
-                    f"in one response for parallel execution."
-                )
-                self.messages.append(ChatMessage(role="user", content=result_message))
-
-                step = AgentStep(
-                    step_number=iteration,
-                    thinking=clean_response,
-                    tool_call=all_tool_calls[0],  # Primary call for tracking
-                    tool_result=combined_result,
-                    is_final=False,
-                    elapsed=time.time() - step_start,
-                )
+                step = AgentStep(iteration, clean_response, all_tool_calls[0], combined, False, "", step_elapsed)
                 result.steps.append(step)
                 continue
 
-            # ── No tool call and no final answer ─────────────
-            # If the response looks like a conversational reply (not a
-            # confused attempt at tool use), treat it as the final answer
-            # instead of nudging — this prevents the extra round-trip.
+            # ── No tool call, no final answer ─────────────────
             stripped = clean_response.strip()
-            looks_like_answer = (
-                len(stripped) > 20
-                and not stripped.startswith('{')
-                and 'tool' not in stripped[:30].lower()
-            )
-            if looks_like_answer:
+            if len(stripped) > 20 and not stripped.startswith('{') and 'tool' not in stripped[:30].lower():
                 display_text = _clean_for_display(stripped)
-                print(f"\r{' ' * 80}\r", end="")
-                print(f"\n{display_text}\n")
-                step = AgentStep(
-                    step_number=iteration,
-                    thinking=clean_response,
-                    tool_call=None,
-                    tool_result="",
-                    is_final=True,
-                    final_answer=stripped,
-                    elapsed=time.time() - step_start,
-                )
+                print(f"\r{' ' * 80}\r\n{display_text}\n")
+                step = AgentStep(iteration, clean_response, None, "", True, stripped, step_elapsed)
                 result.steps.append(step)
                 result.final_answer = stripped
                 break
 
-            # Otherwise nudge the LLM
-            nudge = (
-                "You didn't use a tool or provide a final answer. "
-                "Please either:\n"
-                "1. Use a tool with <tool_call>{...}</tool_call>\n"
-                "2. Provide your final answer with <final_answer>...</final_answer>"
-            )
-            self.messages.append(ChatMessage(role="user", content=nudge))
-            step = AgentStep(
-                step_number=iteration,
-                thinking=clean_response,
-                tool_call=None,
-                tool_result="",
-                is_final=False,
-                elapsed=time.time() - step_start,
-            )
-            result.steps.append(step)
+            # Nudge
+            self.messages.append(ChatMessage(role="user", content=(
+                "Provide a <final_answer> or use <tool_call> tags.")))
+            result.steps.append(AgentStep(iteration, clean_response, None, "", False, "", step_elapsed))
 
         else:
             result.aborted = True
-            print(f"\r{' ' * 80}\r", end="")
-            print(f"  {C.RED}✗ Max iterations ({self.config.max_iterations}) reached.{C.RESET}")
+            print(f"\r{' ' * 80}\r  {C.RED}X Max iterations reached.{C.RESET}")
             if not result.final_answer:
                 result.final_answer = "Task was not completed within the iteration limit."
 
         result.total_elapsed = time.time() - start_time
         self._print_status(result)
+
+        # Upgrade nudge for slow responses
+        if self._slow_response_count >= 2 and self.config.provider == "openrouter":
+            print(f"  {C.YELLOW}Tip:{C.RESET} {C.DIM}Responses are slow on the free tier. "
+                  f"Run /upgrade for faster speed.{C.RESET}\n")
+
         return result
+
+    def compact(self) -> int:
+        """Manually compress context. Returns messages removed."""
+        before = len(self.messages)
+        self.messages = _compress_context(self.messages)
+        removed = before - len(self.messages)
+        return removed
 
     def clear_history(self):
         self.messages.clear()
+        self._slow_response_count = 0
 
     def _print_status(self, result: AgentResult):
-        tool_steps = sum(1 for s in result.steps if s.tool_call)
         tools_used = [s.tool_call.tool for s in result.steps if s.tool_call]
-        # Compact summary like Claude Code
         parts = []
-        if tool_steps:
-            parts.append(f"read {sum(1 for t in tools_used if t == 'read_file')} files" if any(t == 'read_file' for t in tools_used) else "")
-            parts.append(f"edited {sum(1 for t in tools_used if t == 'edit_file')} files" if any(t == 'edit_file' for t in tools_used) else "")
-            parts.append(f"wrote {sum(1 for t in tools_used if t == 'write_file')} files" if any(t == 'write_file' for t in tools_used) else "")
-            parts.append(f"ran {sum(1 for t in tools_used if t == 'run_command')} commands" if any(t == 'run_command' for t in tools_used) else "")
-            parts.append(f"searched {sum(1 for t in tools_used if t == 'search_in_files')} patterns" if any(t == 'search_in_files' for t in tools_used) else "")
-            parts = [p for p in parts if p]
+        for tool_name, label in [("read_file", "read"), ("edit_file", "edited"),
+                                  ("write_file", "wrote"), ("run_command", "ran"),
+                                  ("search_in_files", "searched")]:
+            count = sum(1 for t in tools_used if t == tool_name)
+            if count:
+                noun = "files" if "file" in tool_name else ("commands" if "command" in tool_name else "patterns")
+                parts.append(f"{label} {count} {noun}")
 
         summary = ", ".join(parts) if parts else "no tools used"
-        elapsed = f"{result.total_elapsed:.1f}s"
-        model = self.config.active_model.split("/")[-1]  # short name
-
-        print(f"  {C.DIM}{model} · {summary} · {elapsed} · $0.00{C.RESET}\n")
+        model = self.config.active_model.split("/")[-1]
+        mode_tag = f" [{self.config.mode}]" if self.config.mode != "standard" else ""
+        print(f"  {C.DIM}{model}{mode_tag} · {summary} · {result.total_elapsed:.1f}s · $0.00{C.RESET}\n")
