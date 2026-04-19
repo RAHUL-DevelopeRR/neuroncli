@@ -27,8 +27,10 @@ from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".neuroncli"
 CONFIG_FILE = CONFIG_DIR / "config.json"
-CALLBACK_PORT = 19284  # Obscure port to avoid collisions
-CALLBACK_URL = f"http://localhost:{CALLBACK_PORT}"
+CALLBACK_PORT = 19284  # Local server port to catch the redirect from zero-x.live
+LOCAL_CALLBACK = f"http://localhost:{CALLBACK_PORT}"
+# OpenRouter callback → zero-x.live → redirects to localhost with ?code=
+CALLBACK_URL = "https://zero-x.live/neuroncli/callback"
 
 
 # ── PKCE helpers ──────────────────────────────────────────────────
@@ -78,9 +80,21 @@ def store_api_key(key: str) -> None:
 # ── OAuth PKCE flow ──────────────────────────────────────────────
 
 class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
-    """Tiny HTTP handler that captures the OAuth redirect code."""
+    """Tiny HTTP handler that captures the OAuth redirect code.
+    Handles redirects from zero-x.live callback page."""
 
     auth_code: str | None = None
+
+    def _send_cors_headers(self):
+        """Allow cross-origin requests from zero-x.live."""
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight."""
+        self.send_response(200)
+        self._send_cors_headers()
+        self.end_headers()
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -93,6 +107,7 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
             # Show success page
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
+            self._send_cors_headers()
             self.end_headers()
             self.wfile.write(b"""
             <html>
@@ -112,7 +127,7 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
                         border-radius: 24px;
                         backdrop-filter: blur(20px);
                     }
-                    h1 { color: #00ff88; font-size: 2em; }
+                    h1 { color: #f0a028; font-size: 2em; }
                     p { color: #aaa; font-size: 1.1em; }
                 </style>
             </head>
