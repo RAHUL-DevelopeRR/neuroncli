@@ -179,16 +179,11 @@ def _exchange_code_for_key(code: str, code_verifier: str) -> str:
 
 def run_oauth_flow() -> str | None:
     """
-    Run the full OAuth PKCE flow:
-    1. Generate PKCE challenge
-    2. Open browser to OpenRouter auth
-    3. Start localhost server to catch redirect
-    4. Exchange code for API key
-    5. Store key locally
-
-    Returns the API key on success, None on failure.
+    Run OAuth PKCE + manual paste IN PARALLEL:
+    - Background thread: localhost server waits for callback (10 min)
+    - Foreground: user can paste key manually while waiting
+    - Whichever succeeds first wins.
     """
-    # Reset
     _OAuthCallbackHandler.auth_code = None
 
     # Generate PKCE pair
@@ -203,83 +198,160 @@ def run_oauth_flow() -> str | None:
         f"&code_challenge_method=S256"
     )
 
-    # Start callback server in background
+    # Start callback server in background thread
+    server = None
     try:
         server = http.server.HTTPServer(("127.0.0.1", CALLBACK_PORT), _OAuthCallbackHandler)
     except OSError:
-        # Port in use — another instance is running
-        print(f"\n  \033[91m[X] Port {CALLBACK_PORT} is in use. Close other instances first.\033[0m")
-        return None
-    server.timeout = 120  # 2 minute timeout
+        pass  # Port in use — skip background listener
 
-    print("\n  \033[96m\033[1m[AUTH]\033[0m Opening browser for OpenRouter login...")
-    print(f"  \033[90mIf browser doesn't open, visit:\033[0m")
-    print(f"  \033[90m{auth_url[:80]}...\033[0m\n")
+    server_thread = None
+    if server:
+        server.timeout = 600  # 10 MINUTES — enough for signup + email verify + survey
+        def _listen():
+            try:
+                server.handle_request()
+            except Exception:
+                pass
+            finally:
+                server.server_close()
+        server_thread = threading.Thread(target=_listen, daemon=True)
+        server_thread.start()
 
     # Open browser
+    print("\n  \033[96m\033[1m[AUTH]\033[0m Opening browser for OpenRouter login...")
     try:
         webbrowser.open(auth_url)
     except Exception:
-        print("  \033[90m(Browser could not be opened. Use the URL above.)\033[0m")
-
-    print("  \033[93mWaiting for authentication...\033[0m", end="", flush=True)
-
-    # Wait for the callback (blocks until request or timeout)
-    try:
-        server.handle_request()  # Handles exactly one request
-    except Exception:
         pass
-    finally:
-        server.server_close()
 
+    # Show user-friendly instructions
+    print(f"  \033[90m──────────────────────────────────────────────\033[0m")
+    print(f"  \033[97mSign up / log in to OpenRouter in your browser.\033[0m")
+    print(f"  \033[97mAfter login, you'll be redirected back here.\033[0m")
+    print(f"  \033[90m──────────────────────────────────────────────\033[0m")
+    print(f"  \033[90mIf auto-redirect doesn't work:\033[0m")
+    print(f"  \033[90m1. Go to: \033[4mhttps://openrouter.ai/settings/keys\033[0m")
+    print(f"  \033[90m2. Click 'Create Key' -> copy the key\033[0m")
+    print(f"  \033[90m3. Paste it below\033[0m")
+    print(f"  \033[90m──────────────────────────────────────────────\033[0m\n")
+
+    # PARALLEL: Wait for EITHER OAuth callback OR manual paste
+    # Poll every 2 seconds to check if background OAuth succeeded
+    import time
+    import sys
+    import select
+
+    api_key = None
+
+    # On Windows, we can't use select() on stdin. Use a simpler approach.
+    if sys.platform == "win32":
+        api_key = _windows_parallel_auth(server_thread, code_verifier)
+    else:
+        api_key = _unix_parallel_auth(server_thread, code_verifier)
+
+    # Clean up server
+    if server:
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+    if api_key:
+        store_api_key(api_key)
+        print(f"\n  \033[92m\033[1m[OK] API key saved to {CONFIG_FILE}\033[0m")
+        print(f"  \033[92m\033[1m     You won't be asked again.\033[0m\n")
+        return api_key
+
+    print(f"\n  \033[90mNo API key provided. Using Ollama fallback if available.\033[0m\n")
+    return None
+
+
+def _check_oauth_result(code_verifier: str) -> str | None:
+    """Check if the background OAuth server received a code."""
     code = _OAuthCallbackHandler.auth_code
     if not code:
-        print(f"\n  \033[91m[X] OAuth timed out or failed.\033[0m")
-        return _manual_key_fallback()
-
-    print(f" \033[92mv\033[0m")
-    print("  \033[96mExchanging code for API key...\033[0m", end="", flush=True)
-
-    # Exchange code for key
+        return None
     try:
-        api_key = _exchange_code_for_key(code, code_verifier)
-    except RuntimeError as e:
-        print(f"\n  \033[91m[X] {e}\033[0m")
-        return _manual_key_fallback()
-
-    # Store
-    store_api_key(api_key)
-    print(f" \033[92mv\033[0m")
-    print(f"  \033[92m\033[1m[OK] API key saved to {CONFIG_FILE}\033[0m\n")
-
-    return api_key
+        return _exchange_code_for_key(code, code_verifier)
+    except RuntimeError:
+        return None
 
 
-def _manual_key_fallback() -> str | None:
-    """Fallback: let user manually paste their OpenRouter API key."""
-    print(f"\n  \033[96m\033[1m[MANUAL SETUP]\033[0m")
-    print(f"  \033[90mOAuth didn't work. You can paste your key instead:\033[0m")
-    print(f"  \033[90m1. Go to: https://openrouter.ai/settings/keys\033[0m")
-    print(f"  \033[90m2. Click 'Create Key'\033[0m")
-    print(f"  \033[90m3. Copy the key (starts with sk-or-...)\033[0m\n")
+def _validate_key(key: str) -> bool:
+    """Check if a pasted key looks valid."""
+    key = key.strip()
+    return len(key) > 10 and (key.startswith("sk-or-") or key.startswith("sk-"))
+
+
+def _windows_parallel_auth(server_thread, code_verifier: str) -> str | None:
+    """Windows: prompt for manual paste while checking OAuth in background."""
+    import time
+
+    print("  \033[93mPaste your API key below (or wait for auto-redirect):\033[0m")
+    print("  \033[93m> \033[0m", end="", flush=True)
 
     try:
-        key = input("  \033[93mPaste your API key (or Enter to skip): \033[0m").strip()
+        key = input().strip()
     except (EOFError, KeyboardInterrupt):
-        return None
+        key = ""
 
-    if not key:
-        print(f"\n  \033[90mSkipped. Using Ollama fallback if available.\033[0m\n")
-        return None
-
-    if key.startswith("sk-or-") or key.startswith("sk-"):
-        store_api_key(key)
-        print(f"  \033[92m\033[1m[OK] API key saved to {CONFIG_FILE}\033[0m\n")
+    if key and _validate_key(key):
         return key
-    else:
-        print(f"  \033[91m[X] Invalid key format. Expected 'sk-or-...' \033[0m")
-        print(f"  \033[90mGet one at: https://openrouter.ai/settings/keys\033[0m\n")
-        return None
+
+    # Check if OAuth completed while user was typing
+    result = _check_oauth_result(code_verifier)
+    if result:
+        print("  \033[92m[v] Auto-redirect succeeded!\033[0m")
+        return result
+
+    # Neither worked — wait up to 30 more seconds for OAuth
+    print("  \033[90mWaiting for browser redirect...\033[0m", end="", flush=True)
+    for _ in range(15):
+        time.sleep(2)
+        result = _check_oauth_result(code_verifier)
+        if result:
+            print(f" \033[92mv\033[0m")
+            return result
+        print(".", end="", flush=True)
+
+    print(f" \033[91mx\033[0m")
+    return None
+
+
+def _unix_parallel_auth(server_thread, code_verifier: str) -> str | None:
+    """Unix: prompt for manual paste while checking OAuth in background."""
+    import time
+
+    print("  \033[93mPaste your API key below (or wait for auto-redirect):\033[0m")
+    print("  \033[93m> \033[0m", end="", flush=True)
+
+    try:
+        key = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        key = ""
+
+    if key and _validate_key(key):
+        return key
+
+    # Check if OAuth completed while user was typing
+    result = _check_oauth_result(code_verifier)
+    if result:
+        print("  \033[92m[v] Auto-redirect succeeded!\033[0m")
+        return result
+
+    # Neither worked — wait up to 30 more seconds for OAuth
+    print("  \033[90mWaiting for browser redirect...\033[0m", end="", flush=True)
+    for _ in range(15):
+        time.sleep(2)
+        result = _check_oauth_result(code_verifier)
+        if result:
+            print(f" \033[92mv\033[0m")
+            return result
+        print(".", end="", flush=True)
+
+    print(f" \033[91mx\033[0m")
+    return None
 
 
 # ── Public API ────────────────────────────────────────────────────
@@ -289,12 +361,11 @@ def ensure_api_key() -> str | None:
     Ensure an API key is available. Checks in order:
     1. OPENROUTER_API_KEY env var
     2. ~/.neuroncli/config.json
-    3. Interactive OAuth PKCE flow (first-run)
-    4. Manual key paste (fallback if OAuth fails)
+    3. OAuth PKCE (background) + manual paste (foreground) — in parallel
 
     Returns the API key or None if all methods fail.
     """
-    # Check env var first
+    # Check env var
     env_key = os.environ.get("OPENROUTER_API_KEY")
     if env_key:
         return env_key
@@ -304,12 +375,11 @@ def ensure_api_key() -> str | None:
     if stored_key:
         return stored_key
 
-    # First run — interactive OAuth
-    print("\n  \033[96m\033[1m╔════════════════════════════════════════════════╗")
-    print("  ║  Welcome to NeuronCLI!                         ║")
-    print("  ║  Let's connect your free OpenRouter account.   ║")
-    print("  ║  This only happens once.                       ║")
-    print("  ╚════════════════════════════════════════════════╝\033[0m")
+    # First run — welcome message
+    print("\n  \033[96m\033[1m╔══════════════════════════════════════════════════╗")
+    print("  ║  Welcome to NeuronCLI!                            ║")
+    print("  ║  Free AI coding agent — one-time setup below.     ║")
+    print("  ╚══════════════════════════════════════════════════╝\033[0m")
 
     return run_oauth_flow()
 
