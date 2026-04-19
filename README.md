@@ -12,21 +12,7 @@
 # Windows
 pip install neuroncli
 
-# Linux / macOS (modern distros use pipx)
-pipx install neuroncli
-
-# If pipx not installed:
-# sudo apt install pipx && pipx ensurepath    (Debian/Ubuntu)
-# sudo dnf install pipx && pipx ensurepath    (Fedora)
-# brew install pipx && pipx ensurepath        (macOS)
-
-# From source (any platform)
-git clone https://github.com/RAHUL-DevelopeRR/neuroncli.git
-cd neuroncli && pip install -e .
-```
-
-```bash
-# Linux/macOS auto-install script
+# Linux / macOS (one command — no sudo, no pipx needed)
 curl -fsSL https://raw.githubusercontent.com/RAHUL-DevelopeRR/neuroncli/master/install.sh | bash
 ```
 
