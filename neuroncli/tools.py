@@ -215,7 +215,7 @@ def list_directory(config: AgentConfig, path: str = ".", recursive: str = "false
 
 
 def _tree_walk(directory: Path, lines: list[str], prefix: str, depth: int, max_depth: int):
-    """Recursively build a tree view."""
+    """Recursively build a tree view. Robust against Windows permission errors."""
     if depth >= max_depth:
         return
 
@@ -223,11 +223,11 @@ def _tree_walk(directory: Path, lines: list[str], prefix: str, depth: int, max_d
 
     try:
         entries = sorted(directory.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
-    except PermissionError:
-        lines.append(f"{prefix}└── [permission denied]")
+    except (PermissionError, OSError):
+        lines.append(f"{prefix}└── [access denied]")
         return
 
-    entries = [e for e in entries if e.name not in SKIP]
+    entries = [e for e in entries if e.name not in SKIP and not e.name.startswith('.')]
     total = len(entries)
 
     for idx, entry in enumerate(entries):
@@ -235,14 +235,23 @@ def _tree_walk(directory: Path, lines: list[str], prefix: str, depth: int, max_d
         connector = "└── " if is_last else "├── "
         extension = "    " if is_last else "│   "
 
-        if entry.is_dir():
-            child_count = sum(1 for _ in entry.iterdir()) if depth < max_depth - 1 else 0
-            lines.append(f"{prefix}{connector}[DIR] {entry.name}/ ({child_count} items)")
-            _tree_walk(entry, lines, prefix + extension, depth + 1, max_depth)
-        else:
-            size = entry.stat().st_size
-            size_str = _format_size(size)
-            lines.append(f"{prefix}{connector}{entry.name} ({size_str})")
+        try:
+            if entry.is_dir():
+                try:
+                    child_count = sum(1 for _ in entry.iterdir()) if depth < max_depth - 1 else 0
+                except (PermissionError, OSError):
+                    child_count = 0
+                lines.append(f"{prefix}{connector}[DIR] {entry.name}/ ({child_count} items)")
+                _tree_walk(entry, lines, prefix + extension, depth + 1, max_depth)
+            else:
+                try:
+                    size = entry.stat().st_size
+                    size_str = _format_size(size)
+                except (PermissionError, OSError):
+                    size_str = "?"
+                lines.append(f"{prefix}{connector}{entry.name} ({size_str})")
+        except (PermissionError, OSError):
+            lines.append(f"{prefix}{connector}{entry.name} [access denied]")
 
 
 def _format_size(size: int) -> str:

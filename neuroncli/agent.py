@@ -88,8 +88,12 @@ def parse_all_tool_calls(text: str) -> list[ParsedToolCall]:
 
 
 def parse_final_answer(text: str) -> str | None:
-    match = FINAL_ANSWER_PATTERN.search(text)
-    return match.group(1).strip() if match else None
+    """Extract final answer. Uses LAST match to skip cases where
+    the LLM mentions <final_answer> in its reasoning text."""
+    matches = list(FINAL_ANSWER_PATTERN.finditer(text))
+    if matches:
+        return matches[-1].group(1).strip()
+    return None
 
 
 def _strip_ansi(text: str) -> str:
@@ -153,13 +157,22 @@ def _render_table(table_text: str) -> str:
 
 
 def _clean_for_display(text: str) -> str:
-    """Strip XML tags, render markdown as ANSI for terminal display.
-    Uses brand colors: orange headers, cyan code, bold text."""
+    """Strip XML tags, LLM reasoning, render markdown as ANSI.
+    Uses brand colors: orange headers, blue code, bold text."""
     # Strip XML tags
     text = re.sub(r'</?final_answer>', '', text)
     text = re.sub(r'</?tool_call>', '', text)
     text = re.sub(r'<[a-z_/][^>]*>', '', text)
     text = re.sub(r'(?i)\b(tags? as instructed|as instructed)\.?\s*', '', text)
+
+    # Strip LLM reasoning preamble (lines starting with thinking patterns)
+    reasoning_patterns = [
+        r'^.*(?:So I should|I will|I need to|Let me|The user|I\'ll).*$',
+        r'^.*(?:block and no tool calls|respond directly).*$',
+        r'^.*(?:directly\."|just greet).*$',
+    ]
+    for pat in reasoning_patterns:
+        text = re.sub(pat, '', text, flags=re.MULTILINE)
 
     # Render markdown tables with brand colors
     table_pattern = re.compile(r'((?:^\|.+\|$\n?){2,})', re.MULTILINE)
