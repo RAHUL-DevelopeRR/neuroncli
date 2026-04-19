@@ -1,4 +1,4 @@
-"""NeuronCLI — ReAct agent engine v2.0. Parallel tools, context compression, hybrid speed."""
+"""NeuronCLI — ReAct agent engine v2.1. Parallel tools, git integration, token tracking."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from .config import AgentConfig, MODE_YOLO, MODE_PLAN
 from .provider import ChatMessage, create_provider, ProviderConnectionError
 from .prompts import build_system_prompt
 from .tools import registry as tool_registry
+from .git_integration import git_auto_commit, is_git_repo
 from .ui import (
     _ORANGE, _GREEN, _RED, _GRAY, _BLUE, _YELLOW,
     RST, BOLD, DIM,
@@ -96,67 +97,95 @@ def _strip_ansi(text: str) -> str:
 
 
 def _render_table(table_text: str) -> str:
-    """Convert markdown table to clean aligned terminal text."""
+    """Convert markdown table to clean aligned terminal text with brand colors.
+    - Headers: Neuron orange + bold
+    - Separator: thin orange dashes (capped width)
+    - Data rows: clean default color
+    - Max column width: 40 chars (truncate with ...)
+    """
+    MAX_COL_WIDTH = 40
+
     lines = table_text.strip().split('\n')
     rows = []
     for line in lines:
         line = line.strip()
-        if not line or line.startswith('|') is False:
+        if not line or not line.startswith('|'):
             continue
         # Skip separator rows (|---|---|)
-        if re.match(r'^\|[\s:|-]+\|$', line):
+        if re.match(r'^\|[\s:|\-]+\|$', line):
             continue
         cells = [c.strip() for c in line.strip('|').split('|')]
         rows.append(cells)
     if not rows:
         return table_text
 
-    # Calculate column widths
+    # Column count and capped widths
     cols = max(len(r) for r in rows)
     widths = [0] * cols
     for row in rows:
         for i, cell in enumerate(row):
             if i < cols:
-                widths[i] = max(widths[i], len(cell))
+                widths[i] = max(widths[i], min(len(cell), MAX_COL_WIDTH))
 
-    # Render
+    # Truncate helper
+    def fit(cell: str, w: int) -> str:
+        if len(cell) > w:
+            return cell[:w - 3] + "..."
+        return f"{cell:<{w}}"
+
+    # Render with brand colors
     output = []
     for idx, row in enumerate(rows):
         parts = []
         for i in range(cols):
             cell = row[i] if i < len(row) else ''
-            if idx == 0:  # Header row
-                parts.append(f"{BOLD}{cell:<{widths[i]}}{RST}")
-            else:
-                parts.append(f"{cell:<{widths[i]}}")
+            w = widths[i]
+            if idx == 0:  # Header row — brand orange + bold
+                parts.append(f"{_ORANGE}{BOLD}{fit(cell, w)}{RST}")
+            else:  # Data rows
+                parts.append(fit(cell, w))
         output.append('  ' + '  '.join(parts))
         if idx == 0:
-            output.append('  ' + '  '.join('-' * w for w in widths))
+            # Separator — thin orange line, per-column width
+            sep_parts = [f"{_GRAY}{'-' * w}{RST}" for w in widths]
+            output.append('  ' + '  '.join(sep_parts))
     return '\n'.join(output)
 
 
 def _clean_for_display(text: str) -> str:
     """Strip XML tags, render markdown as ANSI for terminal display.
-    Handles: bold, italic, code, headers, bullets, and TABLES."""
+    Uses brand colors: orange headers, cyan code, bold text."""
     # Strip XML tags
     text = re.sub(r'</?final_answer>', '', text)
     text = re.sub(r'</?tool_call>', '', text)
     text = re.sub(r'<[a-z_/][^>]*>', '', text)
     text = re.sub(r'(?i)\b(tags? as instructed|as instructed)\.?\s*', '', text)
 
-    # Render markdown tables
-    table_pattern = re.compile(
-        r'((?:^\|.+\|$\n?){2,})',
-        re.MULTILINE
-    )
+    # Render markdown tables with brand colors
+    table_pattern = re.compile(r'((?:^\|.+\|$\n?){2,})', re.MULTILINE)
     text = table_pattern.sub(lambda m: _render_table(m.group(1)), text)
 
-    # Render markdown formatting as ANSI
+    # Headers — brand orange
+    text = re.sub(r'^#{1,3}\s+(.+)$',
+                  lambda m: f"{_ORANGE}{BOLD}{m.group(1)}{RST}",
+                  text, flags=re.MULTILINE)
+    # Bold — white bold
     text = re.sub(r'\*\*(.+?)\*\*', f'{BOLD}\\1{RST}', text)
+    # Italic — dim
     text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', f'{DIM}\\1{RST}', text)
-    text = re.sub(r'`([^`]+)`', f'{C.CYAN}\\1{C.RESET}', text)
-    text = re.sub(r'^#{1,3}\s+(.+)$', f'{BOLD}\\1{RST}', text, flags=re.MULTILINE)
-    text = re.sub(r'^(\s*)- ', lambda m: m.group(1) + '  . ', text, flags=re.MULTILINE)
+    # Inline code — brand cyan
+    text = re.sub(r'`([^`]+)`',
+                  lambda m: f"{_BLUE}{m.group(1)}{RST}",
+                  text)
+    # Bullets — brand orange dot
+    text = re.sub(r'^(\s*)- ',
+                  lambda m: f"{m.group(1)}  {_ORANGE}.{RST} ",
+                  text, flags=re.MULTILINE)
+    # Numbered lists — orange number
+    text = re.sub(r'^(\s*)(\d+)\.\s',
+                  lambda m: f"{m.group(1)}  {_ORANGE}{m.group(2)}.{RST} ",
+                  text, flags=re.MULTILINE)
+    # Clean extra blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -283,6 +312,9 @@ class Agent:
         self.client = create_provider(self.config)
         self.messages: list[ChatMessage] = []
         self._slow_response_count = 0  # Track slow responses for upgrade nudge
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._git_enabled = is_git_repo(self.config.working_dir)
 
     def run(self, task: str, neuron_md: str | None = None) -> AgentResult:
         start_time = time.time()
@@ -339,6 +371,10 @@ class Agent:
             step_elapsed = time.time() - step_start
             clean_response = _strip_ansi(full_response)
             self.messages.append(ChatMessage(role="assistant", content=clean_response))
+
+            # ── Token tracking ────────────────────────────────
+            self._total_input_tokens += sum(len(m.content) for m in self.messages) // 4
+            self._total_output_tokens += len(clean_response) // 4
 
             # ── Track slow responses for upgrade nudge ────────
             if step_elapsed > 30:
@@ -408,6 +444,14 @@ class Agent:
 
                     all_results.append((tc, tool_result))
 
+                    # Git auto-commit for write/edit operations
+                    if self._git_enabled and tc.tool in ("write_file", "edit_file") and "[OK]" in tool_result:
+                        file_path = tc.args.get("path", "")
+                        commit_msg = f"{tc.tool.replace('_', ' ')}: {file_path}"
+                        commit_hash = git_auto_commit(self.config.working_dir, [file_path], commit_msg)
+                        if commit_hash:
+                            print(f"  {DIM}git: committed {commit_hash}{RST}")
+
                 # Build result message
                 result_parts = [f"[Tool: {tc.tool}] {_truncate_result(tr)}" for tc, tr in all_results]
                 combined = "\n---\n".join(result_parts)
@@ -476,4 +520,12 @@ class Agent:
         summary = ", ".join(parts) if parts else "no tools used"
         model = self.config.active_model.split("/")[-1]
         mode_tag = f" [{self.config.mode}]" if self.config.mode != "standard" else ""
-        print(f"  {C.DIM}{model}{mode_tag} · {summary} · {result.total_elapsed:.1f}s · $0.00{C.RESET}\n")
+
+        # Token count display
+        total_tok = self._total_output_tokens
+        if total_tok > 1000:
+            tok_str = f"~{total_tok / 1000:.1f}k tokens"
+        else:
+            tok_str = f"~{total_tok} tokens"
+
+        print(f"  {_GRAY}{model}{mode_tag} {RST}{DIM}. {summary} . {result.total_elapsed:.1f}s . {tok_str} . $0.00{RST}\n")

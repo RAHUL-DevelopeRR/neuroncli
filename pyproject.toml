@@ -4,27 +4,42 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuroncli"
-version = "1.1.0"
-description = "AI Coding Agent — Claude Code-style CLI powered by free Kimi K2.5 + Ollama"
+version = "2.1.0"
+description = "AI Coding Agent — Free Claude Code alternative powered by Kimi K2.5 + Ollama"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
-    {name = "zero-x Corporation"},
+    {name = "Rahul S", email = "rahultech72216@gmail.com"},
 ]
-keywords = ["ai", "coding", "agent", "cli", "llm", "kimi", "ollama"]
+keywords = ["ai", "coding", "agent", "cli", "llm", "kimi", "ollama", "code-assistant"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Topic :: Software Development",
+    "Topic :: Software Development :: Code Generators",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
 ]
+dependencies = [
+    "requests>=2.28.0",
+]
+
+[project.urls]
+Homepage = "https://zero-x.live"
+Repository = "https://github.com/RAHUL-DevelopeRR/neuroncli"
+Issues = "https://github.com/RAHUL-DevelopeRR/neuroncli/issues"
 
 [project.scripts]
 neuron = "neuroncli.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["neuroncli*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
