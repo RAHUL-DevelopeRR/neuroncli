@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuroncli"
-version = "2.1.0"
+version = "2.1.1"
 description = "AI Coding Agent — Free Claude Code alternative powered by Kimi K2.5 + Ollama"
 readme = "README.md"
 license = {text = "MIT"}

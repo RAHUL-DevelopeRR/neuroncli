@@ -189,7 +189,12 @@ def run_oauth_flow() -> str | None:
     )
 
     # Start callback server in background
-    server = http.server.HTTPServer(("127.0.0.1", CALLBACK_PORT), _OAuthCallbackHandler)
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", CALLBACK_PORT), _OAuthCallbackHandler)
+    except OSError:
+        # Port in use — another instance is running
+        print(f"\n  \033[91m[X] Port {CALLBACK_PORT} is in use. Close other instances first.\033[0m")
+        return None
     server.timeout = 120  # 2 minute timeout
 
     print("\n  \033[96m\033[1m[AUTH]\033[0m Opening browser for OpenRouter login...")
@@ -197,7 +202,10 @@ def run_oauth_flow() -> str | None:
     print(f"  \033[90m{auth_url[:80]}...\033[0m\n")
 
     # Open browser
-    webbrowser.open(auth_url)
+    try:
+        webbrowser.open(auth_url)
+    except Exception:
+        print("  \033[90m(Browser could not be opened. Use the URL above.)\033[0m")
 
     print("  \033[93mWaiting for authentication...\033[0m", end="", flush=True)
 
@@ -211,10 +219,10 @@ def run_oauth_flow() -> str | None:
 
     code = _OAuthCallbackHandler.auth_code
     if not code:
-        print(f"\n  \033[91m[X] Authentication timed out or failed.\033[0m")
-        return None
+        print(f"\n  \033[91m[X] OAuth timed out or failed.\033[0m")
+        return _manual_key_fallback()
 
-    print(f" \033[92m✓\033[0m")
+    print(f" \033[92mv\033[0m")
     print("  \033[96mExchanging code for API key...\033[0m", end="", flush=True)
 
     # Exchange code for key
@@ -222,14 +230,41 @@ def run_oauth_flow() -> str | None:
         api_key = _exchange_code_for_key(code, code_verifier)
     except RuntimeError as e:
         print(f"\n  \033[91m[X] {e}\033[0m")
-        return None
+        return _manual_key_fallback()
 
     # Store
     store_api_key(api_key)
-    print(f" \033[92m✓\033[0m")
+    print(f" \033[92mv\033[0m")
     print(f"  \033[92m\033[1m[OK] API key saved to {CONFIG_FILE}\033[0m\n")
 
     return api_key
+
+
+def _manual_key_fallback() -> str | None:
+    """Fallback: let user manually paste their OpenRouter API key."""
+    print(f"\n  \033[96m\033[1m[MANUAL SETUP]\033[0m")
+    print(f"  \033[90mOAuth didn't work. You can paste your key instead:\033[0m")
+    print(f"  \033[90m1. Go to: https://openrouter.ai/settings/keys\033[0m")
+    print(f"  \033[90m2. Click 'Create Key'\033[0m")
+    print(f"  \033[90m3. Copy the key (starts with sk-or-...)\033[0m\n")
+
+    try:
+        key = input("  \033[93mPaste your API key (or Enter to skip): \033[0m").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    if not key:
+        print(f"\n  \033[90mSkipped. Using Ollama fallback if available.\033[0m\n")
+        return None
+
+    if key.startswith("sk-or-") or key.startswith("sk-"):
+        store_api_key(key)
+        print(f"  \033[92m\033[1m[OK] API key saved to {CONFIG_FILE}\033[0m\n")
+        return key
+    else:
+        print(f"  \033[91m[X] Invalid key format. Expected 'sk-or-...' \033[0m")
+        print(f"  \033[90mGet one at: https://openrouter.ai/settings/keys\033[0m\n")
+        return None
 
 
 # ── Public API ────────────────────────────────────────────────────
@@ -240,6 +275,7 @@ def ensure_api_key() -> str | None:
     1. OPENROUTER_API_KEY env var
     2. ~/.neuroncli/config.json
     3. Interactive OAuth PKCE flow (first-run)
+    4. Manual key paste (fallback if OAuth fails)
 
     Returns the API key or None if all methods fail.
     """
@@ -261,3 +297,4 @@ def ensure_api_key() -> str | None:
     print("  ╚════════════════════════════════════════════════╝\033[0m")
 
     return run_oauth_flow()
+
