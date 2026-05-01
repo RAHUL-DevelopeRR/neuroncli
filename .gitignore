@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 dist/
+!dist/neuron.exe
 build/
 *.egg-info/
 *.egg
