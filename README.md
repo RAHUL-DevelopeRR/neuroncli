@@ -1,6 +1,6 @@
 # NeuronCLI
 
-**Free AI Coding Agent** — Claude Code alternative powered by Kimi K2.5. Works on **Windows, Linux, macOS**.
+**Free AI Coding Agent** — Claude Code alternative. Native Rust binary with Azure AI + OpenRouter support.
 
 > Built by [zero-x Corporation](https://zero-x.live)
 
@@ -9,9 +9,18 @@
 ## Install
 
 ```bash
-pip install neuroncli                          # Windows / macOS / Cloud VMs
-pip install neuroncli --break-system-packages  # Linux (Ubuntu 23+, Debian 12+, Fedora 38+)
+# Windows / macOS / Cloud VMs
+pip install neuroncli
+
+# Debian / Ubuntu (Python 3.11+)
+pip install neuroncli --break-system-packages
+
+# Or use pipx (recommended for Debian)
+pipx install neuroncli
 ```
+
+> **v3.0.0** ships a native Rust binary (14MB) for maximum performance.  
+> On systems without the binary, the Python implementation runs as fallback.
 
 ## Quick Start
 
@@ -22,73 +31,55 @@ neuron
 # One-shot task
 neuron "fix the bug in main.py"
 
-# YOLO mode — no permission prompts
-neuron --yolo "refactor src/ to use async"
-
-# Plan mode — think first, code later
+# Plan mode — architecture first, execute later
 neuron --plan "add authentication to this API"
 
-# Use local Ollama instead
-neuron --provider ollama "explain this codebase"
+# YOLO mode — no permission prompts
+neuron --yolo "refactor src/ to use async"
 ```
 
 ## Zero Setup — First Run
 
 1. Type `neuron` in any project directory
 2. Browser opens to **OpenRouter** login (free account)
-3. API key auto-provisioned + saved to `~/.neuroncli/config.json`
+3. API key auto-provisioned + encrypted in `~/.neuroncli/vault.enc`
 4. **Done.** No manual config, no copy-paste.
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| **Parallel Tool Execution** | Reads 5 files simultaneously, not one-by-one |
-| **Git Auto-Commit** | Every AI edit is auto-committed like Aider |
-| **Context Compression** | H2A-style compression prevents context bloat |
-| **3 Modes** | Standard (ask permission), Plan (think first), YOLO (full auto) |
+| **Native Rust Binary** | 14MB single binary, instant startup |
+| **Plan Mode** | `/plan` generates architecture plans, `/plan off` to execute |
+| **? Shortcuts Panel** | Press `?` for Claude Code-style two-column cheatsheet |
+| **Shell Escape** | `!git status`, `!ls` — run commands without burning tokens |
+| **Dynamic Prompt** | Shows current mode: `>`, `[plan] >`, `[edit] >`, `[auto] >` |
+| **Azure AI Foundry** | GPT-5.5 primary (44K tokens/day free quota) |
+| **OpenRouter Fallback** | Free-tier model when Azure quota is exhausted |
+| **Directory Trust** | Interactive security prompt on first use per directory |
 | **Session Persistence** | Resume previous conversations with `/resume` |
-| **Brand Color Output** | Clean terminal output with colored tables, headers |
+| **Git Auto-Commit** | Every AI edit is auto-committed |
+| **Context Compression** | `/compact` prevents context bloat |
 | **NEURON.md** | Project context file (like Claude's CLAUDE.md) |
-| **Token Tracking** | Shows token usage per session |
-| **Dual Provider** | OpenRouter (cloud, free) + Ollama (local, offline) |
 
-## Modes
+## Shortcuts (press `?` in REPL)
 
-```bash
-neuron                    # Standard — asks before writing/running
-neuron --plan             # Plan — generates plan, waits for approval
-neuron --yolo             # YOLO — full autonomous, no prompts
+| Key | Action | Key | Action |
+|-----|--------|-----|--------|
+| `?` | Shortcuts panel | `/help` | Full command list |
+| `!cmd` | Shell command | `/plan` | Toggle plan mode |
+| `Up/Down` | History | `/compact` | Compress context |
+| `Ctrl+C` | Cancel | `/clear` | Reset session |
+| `Ctrl+D` | Exit | `/model` | Switch model |
+
+## Plan Mode
+
 ```
-
-Switch at runtime: `/mode plan`, `/mode yolo`, `/mode standard`
-
-## Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `read_file` | Read file contents with line numbers |
-| `write_file` | Create or overwrite a file |
-| `edit_file` | Surgical find-and-replace edit |
-| `list_directory` | Tree view of directory contents |
-| `run_command` | Execute shell commands |
-| `search_in_files` | Grep-style search across files |
-| `get_project_structure` | Full project overview |
-
-## REPL Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show all commands |
-| `/init` | Create NEURON.md project context |
-| `/compact` | Compress context (free up memory) |
-| `/mode <mode>` | Switch: standard, plan, yolo |
-| `/model <name>` | Switch model |
-| `/provider <name>` | Switch: openrouter, ollama |
-| `/upgrade` | Info on faster response times |
-| `/clear` | Clear conversation history |
-| `/config` | Show current configuration |
-| `/exit` | Exit |
+> /plan                              ← Enter plan mode
+[plan] > add user authentication     ← Agent generates architecture plan
+[plan] > /plan off                   ← Exit plan mode
+> execute the plan                   ← Agent implements with full access
+```
 
 ## CLI Flags
 
@@ -101,31 +92,11 @@ Switch at runtime: `/mode plan`, `/mode yolo`, `/mode standard`
 | `--dir`, `-d` | Working directory |
 | `--no-stream` | Disable token streaming |
 
-## Architecture
-
-```
-neuroncli/
-  agent.py              # ReAct engine — parallel tools, context compression
-  auth.py               # OpenRouter OAuth auto-provisioning
-  cli.py                # REPL + slash commands
-  config.py             # Modes (standard/plan/yolo)
-  git_integration.py    # Auto-commit AI edits
-  session.py            # Save/resume conversations
-  prompts.py            # Mode-aware system prompt builder
-  tools.py              # Tool registry + 7 tool implementations
-  ui.py                 # Brand colors, startup screen
-  provider.py           # Provider abstraction layer
-  openrouter_client.py  # OpenRouter (Kimi K2.5)
-  ollama_client.py      # Local Ollama
-tests/
-  test_agent.py         # 18 unit tests
-```
-
 ## Requirements
 
-- **Python 3.10+**
-- Internet connection (for Kimi K2.5 via OpenRouter)
-- **Optional:** [Ollama](https://ollama.com) for local offline mode
+- **Windows:** Works out of the box (native Rust binary)
+- **Linux/macOS:** Python 3.10+ (Python fallback), or install Rust binary separately
+- Internet connection for Azure AI / OpenRouter
 
 ## License
 
