@@ -116,6 +116,16 @@ class OpenRouterClient:
                 msg = err_data.get("error", {}).get("message", error_body)
             except json.JSONDecodeError:
                 msg = error_body
+            if exc.code == 402:
+                raise OpenRouterConnectionError(
+                    f"\n  [X] OpenRouter: Insufficient credits (402)\n"
+                    f"  {msg}\n\n"
+                    f"  Fix options:\n"
+                    f"  1. Add $5 credits: https://openrouter.ai/settings/credits\n"
+                    f"  2. Switch to a free model: neuron --model moonshotai/kimi-k2.5:free\n"
+                    f"  3. Use Ollama (offline): NEURON_PROVIDER=ollama neuron\n"
+                    f"  4. Re-auth with a funded account: neuron --reauth\n"
+                ) from exc
             raise OpenRouterConnectionError(
                 f"\n  [X] OpenRouter API error ({exc.code})\n"
                 f"  {msg}"
@@ -189,6 +199,7 @@ class OpenRouterClient:
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
+            "route": "fallback",  # Auto-select cheapest available provider
         }
 
     def _post(self, payload: dict) -> dict:

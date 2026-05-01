@@ -353,6 +353,19 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
+    # ── Try native Rust binary first ─────────────────────────
+
+    native = _find_native_binary()
+    if native:
+        import subprocess
+        args_list = argv if argv is not None else sys.argv[1:]
+        try:
+            result = subprocess.run([native] + args_list)
+            return result.returncode
+        except (OSError, FileNotFoundError):
+            pass  # Fall through to Python implementation
+
+    # ── Python fallback ──────────────────────────────────────
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -405,5 +418,35 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 
+def _find_native_binary() -> str | None:
+    """Locate the native Rust binary — bundled in package or in PATH."""
+    import shutil
+
+    # Check bundled binary in package
+    pkg_dir = os.path.dirname(os.path.abspath(__file__))
+    ext = ".exe" if sys.platform == "win32" else ""
+    bundled = os.path.join(pkg_dir, "bin", f"neuron{ext}")
+    if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+        return bundled
+
+    # Check PATH (but not ourselves — avoid infinite recursion)
+    path_binary = shutil.which(f"neuron{ext}")
+    if path_binary:
+        # Verify it's the Rust binary by checking --version output
+        import subprocess
+        try:
+            result = subprocess.run(
+                [path_binary, "--version"],
+                capture_output=True, text=True, timeout=3
+            )
+            if "NeuronCLI" in result.stdout:
+                return path_binary
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    return None
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
+
