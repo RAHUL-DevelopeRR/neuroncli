@@ -109,4 +109,4 @@ class AgentConfig:
 # ── App-wide constants ────────────────────────────────────────────
 
 APP_NAME = "NeuronCLI"
-VERSION = "2.3.0"
+VERSION = "4.0.0"
